@@ -57,14 +57,12 @@ func SetTUNip(name string, ip string) {
 
 }
 func RouteThrowTun(name string, ip_NoMASK string) {
-	// // Enable IP forwarding
-	// exec.Command("sudo", "sysctl", "-w", "net.ipv4.ip_forward=1").CombinedOutput()
-
-	// // Add NAT rule - rewrite outgoing packets to look like they come from real NIC
-	// out, err := exec.Command("sudo", "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", "enp3s0", "-j", "MASQUERADE").CombinedOutput()
-	// fmt.Println("iptables NAT:", string(out), err)
 
 	// Route all traffic through TUN
-	out, err := exec.Command("sudo", "ip", "route", "add", "0.0.0.0/0", "via", ip_NoMASK, "dev", name).CombinedOutput()
+	// out, err := exec.Command("sudo", "ip", "route", "add", "0.0.0.0/0", "via", ip_NoMASK, "dev", name).CombinedOutput()
+	// fmt.Println("route add:", string(out), err)
+	out, err := exec.Command("sudo", "ip", "route", "add", "default", "dev", name, "metric", "1").CombinedOutput()
+	fmt.Println("route add:", string(out), err)
+	out, err = exec.Command("sudo", "ip", "route", "add", "10.0.0.254", "via", "10.0.0.254", "dev", "enp3s0", "metric", "0").CombinedOutput()
 	fmt.Println("route add:", string(out), err)
 }
