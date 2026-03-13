@@ -2,7 +2,9 @@ package main
 
 // tunHandler.go
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -44,4 +46,25 @@ func OpenTUN(name string) (*os.File, string, error) {
 	}
 
 	return fd, strings.TrimRight(string(req.Name[:]), "\x00"), nil
+}
+func SetTUNip(name string, ip string) {
+	// check each command
+	out, err := exec.Command("ip", "addr", "add", ip, "dev", name).CombinedOutput()
+	fmt.Println("addr add:", string(out), err)
+
+	out, err = exec.Command("ip", "link", "set", name, "up").CombinedOutput()
+	fmt.Println("link up:", string(out), err)
+
+}
+func RouteThrowTun(name string, ip_NoMASK string) {
+	// // Enable IP forwarding
+	// exec.Command("sudo", "sysctl", "-w", "net.ipv4.ip_forward=1").CombinedOutput()
+
+	// // Add NAT rule - rewrite outgoing packets to look like they come from real NIC
+	// out, err := exec.Command("sudo", "iptables", "-t", "nat", "-A", "POSTROUTING", "-o", "enp3s0", "-j", "MASQUERADE").CombinedOutput()
+	// fmt.Println("iptables NAT:", string(out), err)
+
+	// Route all traffic through TUN
+	out, err := exec.Command("sudo", "ip", "route", "add", "0.0.0.0/0", "via", ip_NoMASK, "dev", name).CombinedOutput()
+	fmt.Println("route add:", string(out), err)
 }
