@@ -54,39 +54,25 @@ func SetTUNip(name string, ip string) {
 }
 
 func RouteThrowTun(name string, tunIP string, serverIP string) {
-	// Step 1: read current default gateway BEFORE touching any routes
-	// This is the real gateway (e.g. 10.2.0.1 via enp3s0)
-	gwOut, _ := exec.Command("ip", "route", "show", "default").Output()
-	gw, dev := "", ""
-	fmt.Sscanf(string(gwOut), "default via %s dev %s", &gw, &dev)
-	fmt.Printf("Gateway: %s dev %s\n", gw, dev)
+	// defautlGateway := "10.2.0.1"
+	// exec.Command("ip", "route", "add", serverIP+"/32", "via", defautlGateway).CombinedOutput()
 
-	if gw == "" || dev == "" {
-		fmt.Println("ERROR: could not read default gateway, aborting route setup")
-		return
-	}
+	// 2. Redirect all other traffic into the TUN
+	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
 
-	// Step 2: server /32 escape route via real gateway
-	// This MUST exist before adding default dev vpntun
-	// Without it, tunnel UDP to server also enters vpntun -> infinite loop
-	exec.Command("sudo", "ip", "route", "del", serverIP+"/32").CombinedOutput()
-	out, err := exec.Command("sudo", "ip", "route", "add", serverIP+"/32",
-		"via", gw, "dev", dev, "metric", "0").CombinedOutput()
-	fmt.Printf("server escape route: %s %v\n", string(out), err)
+	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
+	// lan
+	// exec.Command("ip", "route", "add", "default", "via", "10.0.0.254", "dev", "enp3s0", "table", "200").CombinedOutput()
+	// wifi
+	exec.Command("ip", "route", "add", "default", "via", "192.168.199.155", "dev", "wlp2s0", "table", "200").CombinedOutput()
 
-	// Step 3: add default via vpntun
-	// 192.168.122.0/24 already exists as kernel route via virbr0 — DO NOT touch it
-	// server /32 already set above — wins by longest prefix
-	// so only internet traffic enters vpntun
-	exec.Command("sudo", "ip", "route", "del", "default", "dev", name).CombinedOutput()
-	out, err = exec.Command("sudo", "ip", "route", "add", "default",
-		"dev", name, "metric", "1").CombinedOutput()
-	fmt.Printf("default vpntun route: %s %v\n", string(out), err)
-
-	fmt.Println("VPN routing active.")
+	// add to RouteThrowTun after route replace
+	exec.Command("resolvectl", "dns", "vpntun", "8.8.8.8").CombinedOutput()
+	exec.Command("resolvectl", "domain", "vpntun", "~.").CombinedOutput()
 }
-
 func RouteThrowTunServer(name string) {
-	// server routing is handled entirely by initServer() + fwmark table 100
-	// nothing needed here
+	exec.Command("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward").CombinedOutput()
+	exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
+		"-s", "192.168.0.0/24", "-o", "enp1s0", "-j", "MASQUERADE").CombinedOutput()
+	exec.Command("ip", "route", "add", "192.168.0.0/24", "dev", name).CombinedOutput()
 }
