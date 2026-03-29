@@ -1,8 +1,8 @@
 package main
 
-// tunHandler.go
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -13,13 +13,13 @@ import (
 const (
 	TUNSETIFF = 0x400454ca
 	IFF_TUN   = 0x0001
-	IFF_NO_PI = 0x1000 // no packet info header
+	IFF_NO_PI = 0x1000
 )
 
 type ifreq struct {
 	Name  [16]byte
 	Flags uint16
-	_     [22]byte // padding
+	_     [22]byte
 }
 
 func OpenTUN(name string) (*os.File, string, error) {
@@ -51,25 +51,55 @@ func SetTUNip(name string, ip string) {
 
 	out, err = exec.Command("ip", "link", "set", name, "up").CombinedOutput()
 	fmt.Println("link up:", string(out), err)
+
+	exec.Command("ip", "link", "set", name, "mtu", "1200").CombinedOutput()
+}
+
+// initSockets is shared by both client and server.
+// mode = "client" → recvFd is SOCK_DGRAM (kernel strips headers)
+// mode = "server" → recvFd is SOCK_RAW  (full packet, manual port filter)
+func initSockets(mode string) (sendFd int, recvFd int) {
+	var err error
+
+	sendFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
+	if err != nil {
+		log.Fatal("sendFd socket:", err)
+	}
+	err = syscall.SetsockoptInt(sendFd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
+	if err != nil {
+		log.Fatal("IP_HDRINCL:", err)
+	}
+
+	if mode == "client" {
+		recvFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
+	} else {
+		recvFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_UDP)
+	}
+	if err != nil {
+		log.Fatal("recvFd socket:", err)
+	}
+
+	addr := syscall.SockaddrInet4{Port: 51820}
+	if err = syscall.Bind(recvFd, &addr); err != nil {
+		log.Fatal("Bind 51820:", err)
+	}
+
+	return sendFd, recvFd
 }
 
 func RouteThrowTun(name string, tunIP string, serverIP string) {
-	// defautlGateway := "10.2.0.1"
-	// exec.Command("ip", "route", "add", serverIP+"/32", "via", defautlGateway).CombinedOutput()
-
-	// 2. Redirect all other traffic into the TUN
+	// virbr0 kernel route already handles 192.168.122.x — no /32 needed
+	// just replace default, virbr0 subnet wins automatically
 	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
 
 	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
-	// lan
-	// exec.Command("ip", "route", "add", "default", "via", "10.0.0.254", "dev", "enp3s0", "table", "200").CombinedOutput()
-	// wifi
-	exec.Command("ip", "route", "add", "default", "via", "192.168.199.155", "dev", "wlp2s0", "table", "200").CombinedOutput()
+	exec.Command("ip", "route", "add", "default", "via", "10.0.0.254",
+		"dev", "enp3s0", "table", "200").CombinedOutput()
 
-	// add to RouteThrowTun after route replace
-	exec.Command("resolvectl", "dns", "vpntun", "8.8.8.8").CombinedOutput()
-	exec.Command("resolvectl", "domain", "vpntun", "~.").CombinedOutput()
+	exec.Command("resolvectl", "dns", name, "10.0.0.254").CombinedOutput()
+	exec.Command("resolvectl", "domain", name, "~.").CombinedOutput()
 }
+
 func RouteThrowTunServer(name string) {
 	exec.Command("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward").CombinedOutput()
 	exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
