@@ -2,8 +2,8 @@ package main
 
 import (
 	"crypto/aes"
+	"crypto/rand"
 	"fmt"
-	"math/rand"
 
 	"crypto/cipher"
 )
@@ -23,10 +23,10 @@ func (eh *encryptHandler) encryptPlain(plainData []byte) []byte {
 	return eh.aead.Seal(Nonce, Nonce, plainData, nil)
 
 }
-func (eh *encryptHandler) encryptPacket(plainData []byte, sessionId string) []byte {
+func (eh *encryptHandler) encryptPacket(plainData []byte, sessionId byte) []byte {
 	Nonce := make([]byte, eh.aead.NonceSize())
 	rand.Read(Nonce)
-	return eh.aead.Seal(Nonce, Nonce, plainData, []byte(sessionId))
+	return eh.aead.Seal(Nonce, Nonce, plainData, []byte{sessionId})
 
 }
 func (eh *encryptHandler) decrypt(encrypted []byte) ([]byte, error) {
@@ -37,9 +37,9 @@ func (eh *encryptHandler) decrypt(encrypted []byte) ([]byte, error) {
 	}
 	return plaintext, nil
 }
-func (eh *encryptHandler) decryptPacket(encrypted []byte, sessionId string) ([]byte, error) {
+func (eh *encryptHandler) decryptPacket(encrypted []byte, sessionId byte) ([]byte, error) {
 	nonce := encrypted[:eh.aead.NonceSize()]
-	plaintext, err := eh.aead.Open(nil, nonce, encrypted[eh.aead.NonceSize():], []byte(sessionId))
+	plaintext, err := eh.aead.Open(nil, nonce, encrypted[eh.aead.NonceSize():], []byte{sessionId})
 	if err != nil {
 		return nil, fmt.Errorf("decrypt failed: %w", err)
 	}

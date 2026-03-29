@@ -1,6 +1,8 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type Packet struct {
 	protocol    byte
@@ -41,11 +43,10 @@ func displayPacket(note string, buf []byte, buffSize int, showInner int) {
 		fmt.Printf("  [inner] Dst IP: %d.%d.%d.%d\n", inner[16], inner[17], inner[18], inner[19])
 	}
 }
-func encapsulateUdpPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte, sessionId string) *encapsulatedUdpPacket {
-	tagged := make([]byte, 8+len(payload))
-	copy(tagged[:8], []byte(sessionId))
-	copy(tagged[8:], payload)
-
+func encapsulateUdpPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte, sessionId byte) *encapsulatedUdpPacket {
+	tagged := make([]byte, 1+len(payload))
+	tagged[0] = sessionId
+	copy(tagged[1:], payload)
 	totalLen := 20 + 8 + len(tagged)
 	buf := make([]byte, totalLen)
 	buf[0] = 0x45
@@ -82,6 +83,12 @@ func encapsulateUdpPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload
 	buf[27] = 0
 	copy(buf[28:], tagged)
 	return &encapsulatedUdpPacket{data: buf, lengthOfData: uint16(totalLen)}
+}
+func decapsulateUdpPacket(encapPacket []byte) (innerPacket []byte, sessionId byte) {
+	payload := encapPacket[28:]
+	sessionId = payload[0] // 1 byte, no string, no hex
+	innerPacket = payload[1:]
+	return
 }
 
 func calculateHeaderChecksum(header []byte) uint16 {

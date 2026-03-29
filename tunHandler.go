@@ -88,21 +88,65 @@ func initSockets(mode string) (sendFd int, recvFd int) {
 }
 
 func RouteThrowTun(name string, tunIP string, serverIP string) {
-	// virbr0 kernel route already handles 192.168.122.x — no /32 needed
-	// just replace default, virbr0 subnet wins automatically
+
+	gw := getDefaultGateway()
+	iface := getDefaultInterface()
+
+	//for real use
+	//exec.Command("ip", "route", "add", serverIP+"/32", "via", gw, "dev", iface).CombinedOutput()
 	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
-
+	//its only for vm test
 	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
-	exec.Command("ip", "route", "add", "default", "via", "10.0.0.254",
-		"dev", "enp3s0", "table", "200").CombinedOutput()
 
-	exec.Command("resolvectl", "dns", name, "10.0.0.254").CombinedOutput()
+	exec.Command("ip", "route", "add", "default", "via", gw,
+		"dev", iface, "table", "200").CombinedOutput()
+
+	exec.Command("resolvectl", "dns", name, getCurrentDNS()).CombinedOutput()
 	exec.Command("resolvectl", "domain", name, "~.").CombinedOutput()
 }
 
 func RouteThrowTunServer(name string) {
+	iface := getDefaultInterface()
 	exec.Command("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward").CombinedOutput()
 	exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
-		"-s", "192.168.0.0/24", "-o", "enp1s0", "-j", "MASQUERADE").CombinedOutput()
+		"-s", "192.168.0.0/24", "-o", iface, "-j", "MASQUERADE").CombinedOutput()
 	exec.Command("ip", "route", "add", "192.168.0.0/24", "dev", name).CombinedOutput()
+}
+
+// get default gateway before replacing
+func getDefaultGateway() string {
+	out, _ := exec.Command("ip", "route", "show", "default").Output()
+	// "default via 192.168.1.1 dev eth0"
+	fields := strings.Fields(string(out))
+	if len(fields) >= 3 {
+		return fields[2] // "192.168.1.1"
+	}
+	return ""
+}
+
+// get default interface
+func getDefaultInterface() string {
+	out, _ := exec.Command("ip", "route", "show", "default").Output()
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "dev" && i+1 < len(fields) {
+			return fields[i+1] // "eth0", "enp3s0", "wlan0"
+		}
+	}
+	return ""
+}
+
+// get current DNS
+func getCurrentDNS() string {
+	out, _ := exec.Command("resolvectl", "status", "--no-pager").Output()
+	// parse "DNS Servers: 8.8.8.8"
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "DNS Servers") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 {
+				return fields[2]
+			}
+		}
+	}
+	return "8.8.8.8" // fallback
 }

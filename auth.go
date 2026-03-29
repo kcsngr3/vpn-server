@@ -7,21 +7,21 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	mrand "math/rand"
+
 	"net"
 	"sync"
 )
 
 // ip pool
 type IPPool struct {
-	usedIp map[byte]uint32
+	usedIp map[byte]byte
 	mu     sync.Mutex
 }
 
 func newIPPool() *IPPool {
-	return &IPPool{usedIp: make(map[byte]uint32)}
+	return &IPPool{usedIp: make(map[byte]byte)}
 }
-func (pool *IPPool) assignIP(sessionId uint32) (byte, uint32, error) {
+func (pool *IPPool) assignIP(sessionId byte) (byte, byte, error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
@@ -102,19 +102,18 @@ func ListenAuth(server *Server) {
 					c.RemoteAddr(), sessionId, vpnIpEnd) // log success
 				addr := conn.RemoteAddr().(*net.TCPAddr)
 				ip := addr.IP.To4()
-				sessionIdStringHex := fmt.Sprintf("%x", sessionId) //make uint into strhex
+				// sessionIdStringHex := fmt.Sprintf("%02x", sessionId) //make uint into strhex
 
 				//need lock
 				server.mu.Lock()
-				server.session[sessionIdStringHex] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey)}
-				server.dstIpToSessionId[vpnIpEnd] = sessionIdStringHex
-				eh := server.session[sessionIdStringHex].eh
+				server.session[sessionId] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey)}
+				server.dstIpToSessionId[vpnIpEnd] = sessionId
+				eh := server.session[sessionId].eh
 				server.mu.Unlock()
 
-				// combine into one plaintext
-				plaintext := make([]byte, 9)
-				copy(plaintext[:8], []byte(sessionIdStringHex)) // 8 bytes session
-				plaintext[8] = vpnIpEnd                         // 1 byte vpnIP
+				plaintext := make([]byte, 2)
+				plaintext[0] = sessionId // uint8, 1 byte
+				plaintext[1] = vpnIpEnd  // uint8, 1 byte
 
 				// encrypt once
 				encrypted := eh.encryptPlain(plaintext)
@@ -126,10 +125,13 @@ func ListenAuth(server *Server) {
 }
 
 // server
-func processAuth(ippool *IPPool) (uint32, byte, error) {
-	vpnIpEnd, sessionId, err := ippool.assignIP(mrand.Uint32())
+func processAuth(ippool *IPPool) (byte, byte, error) {
+
+	b := make([]byte, 1)
+	rand.Read(b)
+	vpnIpEnd, sessionId, err := ippool.assignIP(b[0]) // already uint8, range 0-255
 	if err == nil {
-		return uint32(sessionId), byte(vpnIpEnd), nil
+		return byte(sessionId), byte(vpnIpEnd), nil
 	} else {
 		return 0, 0, fmt.Errorf("%s", err)
 	}
@@ -181,10 +183,9 @@ func SendAuth(client *Client, serverIp string) (int, error) {
 	n, _ := conn.Read(ioBuf)
 	plaintext, err := client.eh.decrypt(ioBuf[:n])
 
-	sessionId := string(plaintext[:8])
-	fmt.Println(sessionId)
-	client.sessionId = sessionId
-	vpnIpEnd := plaintext[8]
+	fmt.Printf("SessionId Hex: %02x\n", plaintext[0])
+	client.sessionId = plaintext[0]
+	vpnIpEnd := plaintext[1]
 
 	return int(vpnIpEnd), nil
 }

@@ -19,8 +19,8 @@ type Server struct {
 	recvFd           int
 	mu               sync.RWMutex
 	ippool           *IPPool
-	session          map[string]*ClientSession
-	dstIpToSessionId map[byte]string
+	session          map[byte]*ClientSession
+	dstIpToSessionId map[byte]byte
 }
 
 func initServer() (sendFd int, recvFd int) {
@@ -30,15 +30,16 @@ func initServer() (sendFd int, recvFd int) {
 }
 
 func (s *Server) filterTrafficFromClient(buf []byte, buffSize int) bool {
-	if buffSize < 28 {
+	if buffSize < 49 { // 28 + 1 session + 20 min encrypted
+		return false
+	}
+	// ignore own packets
+	if buf[12] == s.nicIP[0] && buf[13] == s.nicIP[1] &&
+		buf[14] == s.nicIP[2] && buf[15] == s.nicIP[3] {
 		return false
 	}
 	dstPort := uint16(buf[22])<<8 | uint16(buf[23])
 	if dstPort != 51820 {
-		return false
-	}
-	innerPacket := buf[28:buffSize]
-	if len(innerPacket) < 20 {
 		return false
 	}
 	return true
@@ -60,16 +61,18 @@ func (s *Server) filterTrafficToClient(buf []byte, buffSize int) bool {
 // decrypt  need a sessionId, and the unique eh taht contain each session privatekey and sessionkey for auth
 func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
 
-	payload := buf[28:buffSize]
-	sessionId := string(payload[:8])
-	encrypted := payload[8:]
-
+	encryptInner, sessionId := decapsulateUdpPacket(buf)
 	//only read not taht much of bottleneck
 	s.mu.RLock()
 	cs := s.session[sessionId] //ClientSession
+	fmt.Println(sessionId)
 	s.mu.RUnlock()
 
-	innerPacket, _ := cs.eh.decryptPacket(encrypted, sessionId)
+	innerPacket, err := cs.eh.decryptPacket(encryptInner, sessionId)
+	if err != nil {
+		fmt.Printf("decrypt failed: %v sessionId=%02x\n", err, sessionId)
+		return // ADD THIS
+	}
 
 	//displayPacket("server->internet", buf, buffSize, 0)
 	if _, err := s.fd.Write(innerPacket); err != nil {

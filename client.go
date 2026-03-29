@@ -16,7 +16,7 @@ type Client struct {
 	recvFd    int
 	counter   *atomic.Int64
 	eh        encryptHandler
-	sessionId string // its shoudl be uint32-> now large number ->in hex
+	sessionId byte // its shoudl be uint32-> now large number ->in hex
 }
 
 func initClient(authIp string) (sendFd int, recvFd int) {
@@ -48,6 +48,7 @@ func (c *Client) filterClientTrafficToApp(buf []byte, buffSize int) bool {
 // encrypt
 func (c *Client) sendEncapTrafficToServer(buf []byte, buffSize int) {
 	newp := encapsulateUdpPacket(c.nicIP, c.srvIP, 51820, 51820, c.eh.encryptPacket(buf[:buffSize], c.sessionId), c.sessionId)
+	fmt.Print(c.sessionId)
 	dest := &syscall.SockaddrInet4{Port: 0, Addr: c.srvIP}
 	// displayPacket("client->server", buf, buffSize, 1)
 	if err := syscall.Sendto(c.sendFd, newp.data, 0, dest); err != nil {
@@ -82,9 +83,9 @@ func (c *Client) goReadFromServer() {
 			continue
 		}
 		//displayPacket("server->client", buf, buffSize, 1)
-		payload := buf[:buffSize]
-		encrypted := payload[8:]
-		plainP, _ := c.eh.decryptPacket(encrypted, c.sessionId)
+
+		encryptedInner, _ := decapsulateUdpPacket(buf)
+		plainP, _ := c.eh.decryptPacket(encryptedInner, c.sessionId)
 		if _, err := c.fd.Write(plainP); err != nil {
 			fmt.Printf("TUN write error: %v\n", err)
 		}
