@@ -84,6 +84,7 @@ func main() {
 		globalServer = s
 		s.Run()
 		ListenAuth(s)
+		go s.goWatchTimeOut()
 
 	default:
 		panic("unrecognized escape character")
@@ -107,6 +108,7 @@ func loopInput() {
 		}
 		if input == "l" && *mode == "server" {
 			globalServer.ippool.listIPPool()
+			globalServer.listAllSessionTraffic()
 		}
 	}
 }

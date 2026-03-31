@@ -10,6 +10,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"sync"
+	"time"
 )
 
 // ip pool
@@ -106,7 +107,7 @@ func ListenAuth(server *Server) {
 
 				//need lock
 				server.mu.Lock()
-				server.session[sessionIdStringHex] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey)}
+				server.session[sessionIdStringHex] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey), sessionTime: time.Now()}
 				server.dstIpToSessionId[vpnIpEnd] = sessionIdStringHex
 				eh := server.session[sessionIdStringHex].eh
 				server.mu.Unlock()

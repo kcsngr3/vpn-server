@@ -4,13 +4,17 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 type ClientSession struct {
-	nicIp [4]byte
-	vpnIp [4]byte
-	eh    encryptHandler
+	nicIp             [4]byte
+	vpnIp             [4]byte
+	eh                encryptHandler
+	sessionTime       time.Time
+	sessionTrafficBit atomic.Uint64
 }
 type Server struct {
 	fd               *os.File
@@ -21,6 +25,13 @@ type Server struct {
 	ippool           *IPPool
 	session          map[string]*ClientSession
 	dstIpToSessionId map[byte]string
+}
+
+func (s *Server) listAllSessionTraffic() {
+	for sessionID, cs := range s.session {
+		fmt.Printf("SessionID: %x , Traffic Bit: %d", sessionID, cs.sessionTrafficBit.Load())
+	}
+
 }
 
 func initServer() (sendFd int, recvFd int) {
@@ -68,7 +79,15 @@ func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
 	s.mu.RLock()
 	cs := s.session[sessionId] //ClientSession
 	s.mu.RUnlock()
+	if cs == nil {
+		fmt.Printf("Unauthenticated traffic from client %x", sessionId)
+		return
+	}
+	s.mu.Lock()
+	cs.sessionTime = time.Now()
+	s.mu.Unlock()
 
+	cs.sessionTrafficBit.Add(uint64(buffSize))
 	innerPacket, _ := cs.eh.decryptPacket(encrypted, sessionId)
 
 	//displayPacket("server->internet", buf, buffSize, 0)
@@ -83,14 +102,15 @@ func (s *Server) sendEncapTrafficToClient(buf []byte, buffSize int) {
 	s.mu.RLock()
 	sessionId := s.dstIpToSessionId[vpnIpEnd]
 	clientIP := s.session[sessionId].nicIp
-	eh := s.session[sessionId].eh
+	cs := s.session[sessionId]
 	s.mu.RUnlock()
-
-	if clientIP == ([4]byte{}) {
+	if cs == nil {
+		fmt.Printf("Unauthenticated traffic from internet %x", sessionId)
 		return
 	}
+	cs.sessionTrafficBit.Add(uint64(buffSize))
 	// one is for fingerprint and one is for header but, since client will always know his own session no need for o send
-	newp := encapsulateUdpPacket(s.nicIP, clientIP, 51820, 51820, eh.encryptPacket(buf[:buffSize], sessionId), sessionId)
+	newp := encapsulateUdpPacket(s.nicIP, clientIP, 51820, 51820, cs.eh.encryptPacket(buf[:buffSize], sessionId), sessionId)
 	//displayPacket("encap->client", buf, buffSize, 0)
 	destAddr := &syscall.SockaddrInet4{Addr: clientIP}
 	if err := syscall.Sendto(s.sendFd, newp.data, 0, destAddr); err != nil {
@@ -135,4 +155,20 @@ func (s *Server) goIncomingTrafficFromInternet() {
 func (s *Server) Run() {
 	go s.goIncomingTrafficFromClient()
 	go s.goIncomingTrafficFromInternet()
+}
+func (s *Server) goWatchTimeOut() {
+	ticker := time.NewTicker(10 * time.Second)
+	for range ticker.C {
+		s.mu.Lock()
+		for sessionId, cs := range s.session {
+			if time.Since(cs.sessionTime) >= 60*time.Second {
+				fmt.Printf("session %x timed out, disconnecting\n", sessionId)
+				// cleanup
+				s.ippool.ReleaseIp(cs.vpnIp[3])
+				delete(s.dstIpToSessionId, cs.vpnIp[3])
+				delete(s.session, sessionId)
+			}
+		}
+		s.mu.Unlock()
+	}
 }

@@ -90,19 +90,56 @@ func initSockets(mode string) (sendFd int, recvFd int) {
 func RouteThrowTun(name string, tunIP string, serverIP string) {
 	// virbr0 kernel route already handles 192.168.122.x — no /32 needed
 	// just replace default, virbr0 subnet wins automatically
+	iface := getDefaultInterface()
+	gw := getDefaultGateway()
+	dns := getCurrentDNS()
+	fmt.Printf("Iface: %s\nGateway: %s\nDns: %s\n", iface, gw, dns)
 	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
 
 	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
-	exec.Command("ip", "route", "add", "default", "via", "10.0.0.254",
-		"dev", "enp3s0", "table", "200").CombinedOutput()
+	exec.Command("ip", "route", "add", "default", "via", gw,
+		"dev", iface, "table", "200").CombinedOutput()
 
-	exec.Command("resolvectl", "dns", name, "10.0.0.254").CombinedOutput()
+	exec.Command("resolvectl", "dns", name, dns).CombinedOutput()
 	exec.Command("resolvectl", "domain", name, "~.").CombinedOutput()
 }
 
 func RouteThrowTunServer(name string) {
+	iface := getDefaultInterface()
 	exec.Command("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward").CombinedOutput()
 	exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
-		"-s", "192.168.0.0/24", "-o", "enp1s0", "-j", "MASQUERADE").CombinedOutput()
+		"-s", "192.168.0.0/24", "-o", iface, "-j", "MASQUERADE").CombinedOutput()
 	exec.Command("ip", "route", "add", "192.168.0.0/24", "dev", name).CombinedOutput()
+}
+func getDefaultGateway() string {
+	out, _ := exec.Command("ip", "route", "show", "default").Output()
+	fields := strings.Fields(string(out))
+	if len(fields) >= 3 {
+		return fields[2]
+	}
+	return ""
+}
+
+func getDefaultInterface() string {
+	out, _ := exec.Command("ip", "route", "show", "default").Output()
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "dev" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return ""
+}
+
+func getCurrentDNS() string {
+	out, _ := exec.Command("resolvectl", "status", "--no-pager").Output()
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "DNS Servers") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 {
+				return fields[2]
+			}
+		}
+	}
+	return getDefaultGateway() // fallback to gateway as DNS
 }
