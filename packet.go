@@ -42,9 +42,9 @@ func displayPacket(note string, buf []byte, buffSize int, showInner int) {
 	}
 }
 func encapsulateUdpPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte, sessionId string) *encapsulatedUdpPacket {
-	tagged := make([]byte, 8+len(payload))
-	copy(tagged[:8], []byte(sessionId))
-	copy(tagged[8:], payload)
+	tagged := make([]byte, 4+len(payload))
+	copy(tagged[:4], []byte(sessionId))
+	copy(tagged[4:], payload)
 
 	totalLen := 20 + 8 + len(tagged)
 	buf := make([]byte, totalLen)

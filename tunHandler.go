@@ -52,7 +52,7 @@ func SetTUNip(name string, ip string) {
 	out, err = exec.Command("ip", "link", "set", name, "up").CombinedOutput()
 	fmt.Println("link up:", string(out), err)
 
-	exec.Command("ip", "link", "set", name, "mtu", "1200").CombinedOutput()
+	exec.Command("ip", "link", "set", name, "mtu", "1440").CombinedOutput() // 1500-28+20+8+4
 }
 
 // initSockets is shared by both client and server.

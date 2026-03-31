@@ -72,8 +72,8 @@ func (s *Server) filterTrafficToClient(buf []byte, buffSize int) bool {
 func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
 
 	payload := buf[28:buffSize]
-	sessionId := string(payload[:8])
-	encrypted := payload[8:]
+	sessionId := string(payload[:4])
+	encrypted := payload[4:]
 
 	//only read not taht much of bottleneck
 	s.mu.RLock()

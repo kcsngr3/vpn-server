@@ -5,9 +5,9 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
-	mrand "math/rand"
 	"net"
 	"sync"
 	"time"
@@ -15,14 +15,14 @@ import (
 
 // ip pool
 type IPPool struct {
-	usedIp map[byte]uint32
+	usedIp map[byte]uint16
 	mu     sync.Mutex
 }
 
 func newIPPool() *IPPool {
-	return &IPPool{usedIp: make(map[byte]uint32)}
+	return &IPPool{usedIp: make(map[byte]uint16)}
 }
-func (pool *IPPool) assignIP(sessionId uint32) (byte, uint32, error) {
+func (pool *IPPool) assignIP(sessionId uint16) (byte, uint16, error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
@@ -113,9 +113,9 @@ func ListenAuth(server *Server) {
 				server.mu.Unlock()
 
 				// combine into one plaintext
-				plaintext := make([]byte, 9)
-				copy(plaintext[:8], []byte(sessionIdStringHex)) // 8 bytes session
-				plaintext[8] = vpnIpEnd                         // 1 byte vpnIP
+				plaintext := make([]byte, 5)
+				copy(plaintext[:4], []byte(sessionIdStringHex)) // 8 bytes session
+				plaintext[4] = vpnIpEnd                         // 1 byte vpnIP
 
 				// encrypt once
 				encrypted := eh.encryptPlain(plaintext)
@@ -126,14 +126,34 @@ func ListenAuth(server *Server) {
 	}()
 }
 
-// server
-func processAuth(ippool *IPPool) (uint32, byte, error) {
-	vpnIpEnd, sessionId, err := ippool.assignIP(mrand.Uint32())
-	if err == nil {
-		return uint32(sessionId), byte(vpnIpEnd), nil
-	} else {
-		return 0, 0, fmt.Errorf("%s", err)
+func processAuth(ippool *IPPool) (uint16, byte, error) {
+	for attempts := 0; attempts < 10; attempts++ {
+		b := make([]byte, 2)
+		rand.Read(b)
+		sessionId := binary.BigEndian.Uint16(b)
+
+		ippool.mu.Lock()
+		// check sessionId not already in use
+		alreadyUsed := false
+		for _, existingSession := range ippool.usedIp {
+			if existingSession == sessionId {
+				alreadyUsed = true
+				break
+			}
+		}
+		ippool.mu.Unlock()
+
+		if alreadyUsed {
+			continue
+		}
+
+		vpnIpEnd, sessionId, err := ippool.assignIP(sessionId)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s", err)
+		}
+		return sessionId, vpnIpEnd, nil
 	}
+	return 0, 0, fmt.Errorf("could not allocate unique sessionId")
 }
 
 // client
@@ -182,10 +202,10 @@ func SendAuth(client *Client, serverIp string) (int, error) {
 	n, _ := conn.Read(ioBuf)
 	plaintext, err := client.eh.decrypt(ioBuf[:n])
 
-	sessionId := string(plaintext[:8])
+	sessionId := string(plaintext[:4])
 	fmt.Println(sessionId)
 	client.sessionId = sessionId
-	vpnIpEnd := plaintext[8]
+	vpnIpEnd := plaintext[4]
 
 	return int(vpnIpEnd), nil
 }
