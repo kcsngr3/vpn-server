@@ -96,23 +96,20 @@ func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
 	}
 }
 
-// encrypt dst ip-> some vpntun fetch the src
 func (s *Server) sendEncapTrafficToClient(buf []byte, buffSize int) {
 	vpnIpEnd := buf[19]
 	s.mu.RLock()
 	sessionId := s.dstIpToSessionId[vpnIpEnd]
-	clientIP := s.session[sessionId].nicIp
 	cs := s.session[sessionId]
 	s.mu.RUnlock()
-	if cs == nil {
-		fmt.Printf("Unauthenticated traffic from internet %x", sessionId)
+
+	if sessionId == "" || cs == nil {
 		return
 	}
+
 	cs.sessionTrafficBit.Add(uint64(buffSize))
-	// one is for fingerprint and one is for header but, since client will always know his own session no need for o send
-	newp := encapsulateUdpPacket(s.nicIP, clientIP, 51820, 51820, cs.eh.encryptPacket(buf[:buffSize], sessionId), sessionId)
-	//displayPacket("encap->client", buf, buffSize, 0)
-	destAddr := &syscall.SockaddrInet4{Addr: clientIP}
+	newp := encapsulateUdpPacket(s.nicIP, cs.nicIp, 51820, 51820, cs.eh.encryptPacket(buf[:buffSize], sessionId), sessionId)
+	destAddr := &syscall.SockaddrInet4{Addr: cs.nicIp} // nicIp = real NIC IP to reach client
 	if err := syscall.Sendto(s.sendFd, newp.data, 0, destAddr); err != nil {
 		fmt.Printf("Sendto error: %v\n", err)
 	}
