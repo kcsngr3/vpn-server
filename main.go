@@ -70,7 +70,7 @@ func main() {
 		c.Run()
 	case "server":
 		fmt.Println("Server mode")
-
+		RouteThrowTunServer("vpnTun")
 		sendFd, recvFd := initServer()
 		s := &Server{
 			fd:               fd,
@@ -101,10 +101,6 @@ func loopInput() {
 		if input == "n" && *mode == "client" {
 			RouteThrowTun("vpntun", "192.168.0.10", *serverIP)
 			fmt.Print("Routing on")
-		} else if input == "a" && *mode == "client" {
-
-		} else if input == "n" && *mode == "server" {
-			RouteThrowTunServer("vpntun")
 		}
 		if input == "l" && *mode == "server" {
 			globalServer.ippool.listIPPool()

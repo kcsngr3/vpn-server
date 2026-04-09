@@ -48,9 +48,11 @@ func (c *Client) filterClientTrafficToApp(buf []byte, buffSize int) bool {
 // encrypt
 func (c *Client) sendEncapTrafficToServer(buf []byte, buffSize int) {
 	// fmt.Printf("ORIGIN BUFF %d ", buffSize)
+	displayPacket("Client original packet->server", buf, buffSize, 0)
 	encrypt := c.eh.encryptPacket(buf[:buffSize], c.sessionId)
 	// fmt.Printf("WITH ENCRYPT %d + 20 ip header + 8 udp header + 4 sesssionid sum: %d Just encrypt overhead : %d \n", len(encrypt), 20+8+4+len(encrypt), len(encrypt)-buffSize)
 	newp := encapsulateUdpPacket(c.nicIP, c.srvIP, 51820, 51820, encrypt, c.sessionId)
+	displayPacket("Client vpn packet->server", newp.data, int(newp.lengthOfData), 0)
 	dest := &syscall.SockaddrInet4{Port: 0, Addr: c.srvIP}
 	// displayPacket("client->server", buf, buffSize, 1)
 	if err := syscall.Sendto(c.sendFd, newp.data, 0, dest); err != nil {
@@ -84,10 +86,11 @@ func (c *Client) goReadFromServer() {
 		if !c.filterClientTrafficToApp(buf, buffSize) {
 			continue
 		}
-		//displayPacket("server->client", buf, buffSize, 1)
+		displayPacket("Client vpn packet rec from server", buf, buffSize, 0)
 		payload := buf[:buffSize]
 		encrypted := payload[4:]
 		plainP, _ := c.eh.decryptPacket(encrypted, c.sessionId)
+		displayPacket("Client packet rec from server", buf, buffSize, 0)
 		if _, err := c.fd.Write(plainP); err != nil {
 			fmt.Printf("TUN write error: %v\n", err)
 		}

@@ -90,7 +90,8 @@ func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
 	cs.sessionTrafficBit.Add(uint64(buffSize))
 	innerPacket, _ := cs.eh.decryptPacket(encrypted, sessionId)
 
-	//displayPacket("server->internet", buf, buffSize, 0)
+	displayPacket("Server recive mess from client", buf, buffSize, 0)
+	displayPacket("Server send mess to internet", innerPacket, len(innerPacket), 0)
 	if _, err := s.fd.Write(innerPacket); err != nil {
 		fmt.Printf("TUN write error: %v\n", err)
 	}
@@ -109,6 +110,7 @@ func (s *Server) sendEncapTrafficToClient(buf []byte, buffSize int) {
 
 	cs.sessionTrafficBit.Add(uint64(buffSize))
 	newp := encapsulateUdpPacket(s.nicIP, cs.nicIp, 51820, 51820, cs.eh.encryptPacket(buf[:buffSize], sessionId), sessionId)
+	displayPacket("Server generated packet -> client", newp.data, int(newp.lengthOfData), 0)
 	destAddr := &syscall.SockaddrInet4{Addr: cs.nicIp} // nicIp = real NIC IP to reach client
 	if err := syscall.Sendto(s.sendFd, newp.data, 0, destAddr); err != nil {
 		fmt.Printf("Sendto error: %v\n", err)
@@ -144,7 +146,7 @@ func (s *Server) goIncomingTrafficFromInternet() {
 		if !s.filterTrafficToClient(buf, buffSize) {
 			continue
 		}
-		//displayPacket("internet->server", buf, buffSize, 0)
+		displayPacket("Server recive packets from internet", buf, buffSize, 0)
 		s.sendEncapTrafficToClient(buf, buffSize)
 	}
 }
