@@ -52,7 +52,7 @@ func SetTUNip(name string, ip string) {
 	out, err = exec.Command("ip", "link", "set", name, "up").CombinedOutput()
 	fmt.Println("link up:", string(out), err)
 
-	exec.Command("ip", "link", "set", name, "mtu", "1200").CombinedOutput()
+	exec.Command("ip", "link", "set", name, "mtu", "1440").CombinedOutput() // 1500-28+20+8+4
 }
 
 // initSockets is shared by both client and server.
@@ -88,20 +88,19 @@ func initSockets(mode string) (sendFd int, recvFd int) {
 }
 
 func RouteThrowTun(name string, tunIP string, serverIP string) {
-
-	gw := getDefaultGateway()
+	// virbr0 kernel route already handles 192.168.122.x — no /32 needed
+	// just replace default, virbr0 subnet wins automatically
 	iface := getDefaultInterface()
-
-	//for real use
-	//exec.Command("ip", "route", "add", serverIP+"/32", "via", gw, "dev", iface).CombinedOutput()
+	gw := getDefaultGateway()
+	dns := getCurrentDNS()
+	fmt.Printf("Iface: %s\nGateway: %s\nDns: %s\n", iface, gw, dns)
 	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
-	//its only for vm test
-	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
 
+	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
 	exec.Command("ip", "route", "add", "default", "via", gw,
 		"dev", iface, "table", "200").CombinedOutput()
 
-	exec.Command("resolvectl", "dns", name, getCurrentDNS()).CombinedOutput()
+	exec.Command("resolvectl", "dns", name, dns).CombinedOutput()
 	exec.Command("resolvectl", "domain", name, "~.").CombinedOutput()
 }
 
@@ -112,34 +111,28 @@ func RouteThrowTunServer(name string) {
 		"-s", "192.168.0.0/24", "-o", iface, "-j", "MASQUERADE").CombinedOutput()
 	exec.Command("ip", "route", "add", "192.168.0.0/24", "dev", name).CombinedOutput()
 }
-
-// get default gateway before replacing
 func getDefaultGateway() string {
 	out, _ := exec.Command("ip", "route", "show", "default").Output()
-	// "default via 192.168.1.1 dev eth0"
 	fields := strings.Fields(string(out))
 	if len(fields) >= 3 {
-		return fields[2] // "192.168.1.1"
+		return fields[2]
 	}
 	return ""
 }
 
-// get default interface
 func getDefaultInterface() string {
 	out, _ := exec.Command("ip", "route", "show", "default").Output()
 	fields := strings.Fields(string(out))
 	for i, f := range fields {
 		if f == "dev" && i+1 < len(fields) {
-			return fields[i+1] // "eth0", "enp3s0", "wlan0"
+			return fields[i+1]
 		}
 	}
 	return ""
 }
 
-// get current DNS
 func getCurrentDNS() string {
 	out, _ := exec.Command("resolvectl", "status", "--no-pager").Output()
-	// parse "DNS Servers: 8.8.8.8"
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.Contains(line, "DNS Servers") {
 			fields := strings.Fields(line)
@@ -148,5 +141,5 @@ func getCurrentDNS() string {
 			}
 		}
 	}
-	return "8.8.8.8" // fallback
+	return getDefaultGateway() // fallback to gateway as DNS
 }

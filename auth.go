@@ -5,23 +5,24 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
-
 	"net"
 	"sync"
+	"time"
 )
 
 // ip pool
 type IPPool struct {
-	usedIp map[byte]byte
+	usedIp map[byte]uint16
 	mu     sync.Mutex
 }
 
 func newIPPool() *IPPool {
-	return &IPPool{usedIp: make(map[byte]byte)}
+	return &IPPool{usedIp: make(map[byte]uint16)}
 }
-func (pool *IPPool) assignIP(sessionId byte) (byte, byte, error) {
+func (pool *IPPool) assignIP(sessionId uint16) (byte, uint16, error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
 
@@ -102,18 +103,19 @@ func ListenAuth(server *Server) {
 					c.RemoteAddr(), sessionId, vpnIpEnd) // log success
 				addr := conn.RemoteAddr().(*net.TCPAddr)
 				ip := addr.IP.To4()
-				// sessionIdStringHex := fmt.Sprintf("%02x", sessionId) //make uint into strhex
+				sessionIdStringHex := fmt.Sprintf("%x", sessionId) //make uint into strhex
 
 				//need lock
 				server.mu.Lock()
-				server.session[sessionId] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey)}
-				server.dstIpToSessionId[vpnIpEnd] = sessionId
-				eh := server.session[sessionId].eh
+				server.session[sessionIdStringHex] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey), sessionTime: time.Now()}
+				server.dstIpToSessionId[vpnIpEnd] = sessionIdStringHex
+				eh := server.session[sessionIdStringHex].eh
 				server.mu.Unlock()
 
-				plaintext := make([]byte, 2)
-				plaintext[0] = sessionId // uint8, 1 byte
-				plaintext[1] = vpnIpEnd  // uint8, 1 byte
+				// combine into one plaintext
+				plaintext := make([]byte, 5)
+				copy(plaintext[:4], []byte(sessionIdStringHex)) // 8 bytes session
+				plaintext[4] = vpnIpEnd                         // 1 byte vpnIP
 
 				// encrypt once
 				encrypted := eh.encryptPlain(plaintext)
@@ -124,17 +126,34 @@ func ListenAuth(server *Server) {
 	}()
 }
 
-// server
-func processAuth(ippool *IPPool) (byte, byte, error) {
+func processAuth(ippool *IPPool) (uint16, byte, error) {
+	for attempts := 0; attempts < 10; attempts++ {
+		b := make([]byte, 2)
+		rand.Read(b)
+		sessionId := binary.BigEndian.Uint16(b)
 
-	b := make([]byte, 1)
-	rand.Read(b)
-	vpnIpEnd, sessionId, err := ippool.assignIP(b[0]) // already uint8, range 0-255
-	if err == nil {
-		return byte(sessionId), byte(vpnIpEnd), nil
-	} else {
-		return 0, 0, fmt.Errorf("%s", err)
+		ippool.mu.Lock()
+		// check sessionId not already in use
+		alreadyUsed := false
+		for _, existingSession := range ippool.usedIp {
+			if existingSession == sessionId {
+				alreadyUsed = true
+				break
+			}
+		}
+		ippool.mu.Unlock()
+
+		if alreadyUsed {
+			continue
+		}
+
+		vpnIpEnd, sessionId, err := ippool.assignIP(sessionId)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%s", err)
+		}
+		return sessionId, vpnIpEnd, nil
 	}
+	return 0, 0, fmt.Errorf("could not allocate unique sessionId")
 }
 
 // client
@@ -183,9 +202,10 @@ func SendAuth(client *Client, serverIp string) (int, error) {
 	n, _ := conn.Read(ioBuf)
 	plaintext, err := client.eh.decrypt(ioBuf[:n])
 
-	fmt.Printf("SessionId Hex: %02x\n", plaintext[0])
-	client.sessionId = plaintext[0]
-	vpnIpEnd := plaintext[1]
+	sessionId := string(plaintext[:4])
+	fmt.Println(sessionId)
+	client.sessionId = sessionId
+	vpnIpEnd := plaintext[4]
 
 	return int(vpnIpEnd), nil
 }

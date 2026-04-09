@@ -70,7 +70,7 @@ func main() {
 		c.Run()
 	case "server":
 		fmt.Println("Server mode")
-		RouteThrowTunServer("vpntun")
+		RouteThrowTunServer("vpnTun")
 		sendFd, recvFd := initServer()
 		s := &Server{
 			fd:               fd,
@@ -78,12 +78,13 @@ func main() {
 			sendFd:           sendFd,
 			recvFd:           recvFd,
 			ippool:           newIPPool(),
-			session:          make(map[byte]*ClientSession), // ADD
-			dstIpToSessionId: make(map[byte]byte),           // ADD
+			session:          make(map[string]*ClientSession), // ADD
+			dstIpToSessionId: make(map[byte]string),           // ADD
 		}
 		globalServer = s
 		s.Run()
 		ListenAuth(s)
+		go s.goWatchTimeOut()
 
 	default:
 		panic("unrecognized escape character")
@@ -100,8 +101,10 @@ func loopInput() {
 		if input == "n" && *mode == "client" {
 			RouteThrowTun("vpntun", "192.168.0.10", *serverIP)
 			fmt.Print("Routing on")
-		} else if input == "l" && *mode == "server" {
+		}
+		if input == "l" && *mode == "server" {
 			globalServer.ippool.listIPPool()
+			globalServer.listAllSessionTraffic()
 		}
 	}
 }
