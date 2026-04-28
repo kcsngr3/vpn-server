@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -51,7 +52,7 @@ const preSharedKey string = "asd123"
 // server
 func ListenAuth(server *Server) {
 	listenTcp, _ := net.Listen("tcp", ":9000")
-	fmt.Println("Listen on:9000")
+	fmt.Println("Listen auth on:9000")
 	go func() {
 		for {
 			conn, err := listenTcp.Accept()
@@ -103,19 +104,19 @@ func ListenAuth(server *Server) {
 					c.RemoteAddr(), sessionId, vpnIpEnd) // log success
 				addr := conn.RemoteAddr().(*net.TCPAddr)
 				ip := addr.IP.To4()
-				sessionIdStringHex := fmt.Sprintf("%x", sessionId) //make uint into strhex
+				// sessionIdStringHex := fmt.Sprintf("%04x", sessionId) //make uint into strhex
 
 				//need lock
 				server.mu.Lock()
-				server.session[sessionIdStringHex] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey), sessionTime: time.Now()}
-				server.dstIpToSessionId[vpnIpEnd] = sessionIdStringHex
-				eh := server.session[sessionIdStringHex].eh
+				server.session[vpnIpEnd] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey), sessionTime: time.Now(), clientToServer: initTrafficTracker(), serverToClient: initTrafficTracker()}
+				// server.dstIpToSessionId[vpnIpEnd] = sessionIdStringHex
+				eh := server.session[vpnIpEnd].eh
 				server.mu.Unlock()
 
 				// combine into one plaintext
 				plaintext := make([]byte, 5)
-				copy(plaintext[:4], []byte(sessionIdStringHex)) // 8 bytes session
-				plaintext[4] = vpnIpEnd                         // 1 byte vpnIP
+				copy(plaintext[0:4], fmt.Sprintf("%04x", sessionId))
+				plaintext[4] = vpnIpEnd // 1 byte vpnIP
 
 				// encrypt once
 				encrypted := eh.encryptPlain(plaintext)
@@ -125,7 +126,173 @@ func ListenAuth(server *Server) {
 		}
 	}()
 }
+func ListenHeartBeatClient(client *Client) {
+	listenTcp, _ := net.Listen("tcp", ":9001")
+	fmt.Println("Listen HB on:9001")
+	go func() {
+		for {
+			conn, err := listenTcp.Accept()
+			if err != nil {
+				continue
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(3 * time.Second))
 
+				hbBuf := make([]byte, 2+8+32)
+				if _, err := io.ReadFull(c, hbBuf); err != nil {
+					return
+				}
+
+				// replay check
+				ts := int64(binary.BigEndian.Uint64(hbBuf[2:10]))
+				if time.Now().UnixNano()-ts > int64(10*time.Second) {
+					fmt.Println("HB replay rejected")
+					return
+				}
+
+				// verify server->client HMAC
+				mac := hmac.New(sha256.New, client.eh.key[:])
+				mac.Write([]byte("server->client"))
+				mac.Write(hbBuf[:10])
+				if !hmac.Equal(mac.Sum(nil), hbBuf[10:]) {
+					fmt.Println("HB HMAC failed")
+					return
+				}
+
+				// build response with fresh client timestamp
+				clientRecv := time.Now().UnixNano()
+				resp := make([]byte, 2+8+32)
+				copy(resp[0:2], hbBuf[0:2])
+				binary.BigEndian.PutUint64(resp[2:10], uint64(clientRecv))
+
+				// re-sign with client->server label
+				mac2 := hmac.New(sha256.New, client.eh.key[:])
+				mac2.Write([]byte("client->server"))
+				mac2.Write(resp[:10])
+				copy(resp[10:], mac2.Sum(nil))
+
+				c.Write(resp)
+			}(conn)
+		}
+	}()
+}
+func ListenHeartBeatServer(server *Server) {
+	listenTcp, _ := net.Listen("tcp", ":9001")
+	fmt.Println("Listen HB on:9001")
+	go func() {
+		for {
+			conn, err := listenTcp.Accept()
+			if err != nil {
+				continue
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(3 * time.Second))
+
+				resp := make([]byte, 2+8+32)
+				if _, err := io.ReadFull(c, resp); err != nil {
+					return
+				}
+
+				// lookup session by sessionId
+				sessionId := binary.BigEndian.Uint16(resp[0:2])
+				server.mu.RLock()
+				var cs *ClientSession
+				for _, s := range server.session {
+					if binary.BigEndian.Uint16([]byte(s.sessionID[:2])) == sessionId {
+						cs = s
+						break
+					}
+				}
+				server.mu.RUnlock()
+				if cs == nil {
+					return
+				}
+
+				// verify client->server HMAC
+				mac := hmac.New(sha256.New, cs.eh.key[:])
+				mac.Write([]byte("client->server"))
+				mac.Write(resp[:10])
+				if !hmac.Equal(mac.Sum(nil), resp[10:]) {
+					fmt.Println("HB echo HMAC failed")
+					return
+				}
+
+				clientTs := int64(binary.BigEndian.Uint64(resp[2:10]))
+				clientToServer := time.Duration(time.Now().UnixNano() - clientTs)
+				fmt.Printf("sessionId=%x c->s=%v\n", sessionId, clientToServer)
+
+				cs.sessionTime = time.Now() // reset watchdog
+			}(conn)
+		}
+	}()
+}
+func (s *Server) sendHeartbeats() {
+	s.mu.RLock()
+	sessions := make(map[byte]*ClientSession)
+	for k, v := range s.session {
+		sessions[k] = v
+	}
+	s.mu.RUnlock()
+
+	for vpnIpEnd, cs := range sessions {
+		go func(id byte, c *ClientSession) {
+			if !s.sendHeartbeat(id, c) {
+				fmt.Printf("HB failed vpnIp=%d closing session\n", id)
+				s.ippool.ReleaseIp(c.vpnIp[3])
+				s.mu.Lock()
+				delete(s.session, id)
+				s.mu.Unlock()
+			}
+		}(vpnIpEnd, cs)
+	}
+}
+func (s *Server) sendHeartbeat(vpnIpEnd byte, cs *ClientSession) bool {
+	addr := fmt.Sprintf("%d.%d.%d.%d:9001",
+		cs.nicIp[0], cs.nicIp[1], cs.nicIp[2], cs.nicIp[3])
+
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	sentTs := time.Now().UnixNano()
+	hb := make([]byte, 2+8+32)
+	parsed, _ := strconv.ParseUint(cs.sessionID, 16, 16)
+	binary.BigEndian.PutUint16(hb[0:2], uint16(parsed))
+	binary.BigEndian.PutUint64(hb[2:10], uint64(sentTs))
+
+	mac := hmac.New(sha256.New, cs.eh.key[:])
+	mac.Write([]byte("server->client"))
+	mac.Write(hb[:10])
+	copy(hb[10:], mac.Sum(nil))
+
+	if _, err := conn.Write(hb); err != nil {
+		return false
+	}
+
+	resp := make([]byte, 2+8+32)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		return false
+	}
+
+	// verify client->server HMAC
+	mac2 := hmac.New(sha256.New, cs.eh.key[:])
+	mac2.Write([]byte("client->server"))
+	mac2.Write(resp[:10])
+	if !hmac.Equal(mac2.Sum(nil), resp[10:]) {
+		return false
+	}
+
+	rtt := time.Duration(time.Now().UnixNano() - sentTs)
+	fmt.Printf("vpnIp=%d RTT=%.3fms\n", vpnIpEnd, float64(rtt)/float64(time.Millisecond))
+
+	cs.sessionTime = time.Now()
+	return true
+}
 func processAuth(ippool *IPPool) (uint16, byte, error) {
 	for attempts := 0; attempts < 10; attempts++ {
 		b := make([]byte, 2)
@@ -202,7 +369,7 @@ func SendAuth(client *Client, serverIp string) (int, error) {
 	n, _ := conn.Read(ioBuf)
 	plaintext, err := client.eh.decrypt(ioBuf[:n])
 
-	sessionId := string(plaintext[:4])
+	sessionId := string(plaintext[0:4])
 	fmt.Println(sessionId)
 	client.sessionId = sessionId
 	vpnIpEnd := plaintext[4]

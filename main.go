@@ -28,6 +28,15 @@ func parseIPFlag(ipStr string) [4]byte {
 func main() {
 	flag.Parse()
 
+	// auto-detect NIC IP if not provided
+	// if *nicIPFlag == "" {
+	// 	ip, err := getGCloudNicIP()
+	// 	if err != nil {
+	// 		log.Fatal("no --nic provided and gcloud metadata failed:", err)
+	// 	}
+	// 	*nicIPFlag = ip
+	// 	fmt.Printf("Auto-detected NIC IP from GCloud: %s\n", ip)
+	// }
 	nicIP := parseIPFlag(*nicIPFlag)
 	fmt.Printf("Mode:   %s\n", *mode)
 	fmt.Printf("NIC IP: %d.%d.%d.%d\n", nicIP[0], nicIP[1], nicIP[2], nicIP[3])
@@ -65,25 +74,31 @@ func main() {
 		c.sendFd = sendFd
 		c.recvFd = recvFd
 		c.counter = counter
+		c.vpnIpEnd = byte(ipEnd)
+		c.serverToClient = initTrafficTracker()
+		c.clientToServer = initTrafficTracker()
 		//eh set in the auth fase
 
 		c.Run()
+		ListenHeartBeatClient(c)
 	case "server":
 		fmt.Println("Server mode")
 		RouteThrowTunServer("vpnTun")
 		sendFd, recvFd := initServer()
 		s := &Server{
-			fd:               fd,
-			nicIP:            nicIP,
-			sendFd:           sendFd,
-			recvFd:           recvFd,
-			ippool:           newIPPool(),
-			session:          make(map[string]*ClientSession), // ADD
-			dstIpToSessionId: make(map[byte]string),           // ADD
+			fd:      fd,
+			nicIP:   nicIP,
+			sendFd:  sendFd,
+			recvFd:  recvFd,
+			ippool:  newIPPool(),
+			session: make(map[byte]*ClientSession), // ADD
+
+			// dstIpToSessionId: make(map[byte]string),           // ADD
 		}
 		globalServer = s
 		s.Run()
 		ListenAuth(s)
+		ListenHeartBeatServer(s)
 		go s.goWatchTimeOut()
 
 	default:

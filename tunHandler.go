@@ -52,7 +52,7 @@ func SetTUNip(name string, ip string) {
 	out, err = exec.Command("ip", "link", "set", name, "up").CombinedOutput()
 	fmt.Println("link up:", string(out), err)
 
-	exec.Command("ip", "link", "set", name, "mtu", "1440").CombinedOutput() // 1500-28+20+8+4
+	exec.Command("ip", "link", "set", name, "mtu", "1400").CombinedOutput() // 1500-28+20+8+4
 }
 
 // initSockets is shared by both client and server.
@@ -95,6 +95,9 @@ func RouteThrowTun(name string, tunIP string, serverIP string) {
 	dns := getCurrentDNS()
 	fmt.Printf("Iface: %s\nGateway: %s\nDns: %s\n", iface, gw, dns)
 	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
+
+	// exec.Command("ip", "route", "add", serverIP+"/32",
+	// 	"via", gw, "dev", iface).CombinedOutput()
 
 	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
 	exec.Command("ip", "route", "add", "default", "via", gw,
@@ -143,3 +146,19 @@ func getCurrentDNS() string {
 	}
 	return getDefaultGateway() // fallback to gateway as DNS
 }
+
+// func getGCloudNicIP() (string, error) {
+// 	client := &http.Client{Timeout: 2 * time.Second}
+// 	req, _ := http.NewRequest("GET",
+// 		"http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip",
+// 		nil)
+// 	req.Header.Set("Metadata-Flavor", "Google")
+
+// 	resp, err := client.Do(req)
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	defer resp.Body.Close()
+// 	ip, _ := io.ReadAll(resp.Body)
+// 	return string(ip), nil
+// }

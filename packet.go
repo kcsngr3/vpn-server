@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"encoding/binary"
+	"fmt"
+	"time"
+)
 
 type Packet struct {
 	protocol    byte
@@ -13,6 +17,49 @@ type Packet struct {
 type encapsulatedUdpPacket struct {
 	data         []byte
 	lengthOfData uint16
+}
+type trafficTracker struct {
+	highestId      uint64
+	window         uint64 // bitmask of received ID
+	windowSize     uint64
+	droppedTraffic uint64
+}
+
+func initTrafficTracker() *trafficTracker {
+	return &trafficTracker{highestId: 0, window: 0, windowSize: 64, droppedTraffic: 0}
+}
+
+type DroppedTraffic struct {
+	Index     byte
+	Sequence  uint64
+	Timestamp time.Time
+}
+
+func (t *trafficTracker) incrementId() uint64 {
+	t.highestId++
+	return t.highestId
+}
+func (t *trafficTracker) verifyId(idx uint64) bool {
+	if idx > t.highestId {
+		// advance window
+		shift := idx - t.highestId
+		t.window <<= shift
+		t.window |= 1
+		t.highestId = idx
+		return true
+	}
+	diff := t.highestId - idx
+	if diff >= t.windowSize {
+		t.droppedTraffic++
+		return false // too old
+	}
+	bit := uint64(1) << diff
+	if t.window&bit != 0 {
+		t.droppedTraffic++
+		return false // duplicate
+	}
+	t.window |= bit
+	return true
 }
 
 func displayPacket(note string, buf []byte, buffSize int, showInner int) {
@@ -41,10 +88,16 @@ func displayPacket(note string, buf []byte, buffSize int, showInner int) {
 		fmt.Printf("  [inner] Dst IP: %d.%d.%d.%d\n", inner[16], inner[17], inner[18], inner[19])
 	}
 }
-func encapsulateUdpPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte, sessionId string) *encapsulatedUdpPacket {
-	tagged := make([]byte, 4+len(payload))
-	copy(tagged[:4], []byte(sessionId))
-	copy(tagged[4:], payload)
+func encapsulateUdpPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte, idxPacket uint64, vpnIpEnd byte) *encapsulatedUdpPacket {
+	// guard — catches %x without padding bug early
+	// if len(sessionId) != 4 {
+	// 	panic(fmt.Sprintf("sessionId must be 4 chars, got %d: '%s'", len(sessionId), sessionId))
+	// }
+
+	tagged := make([]byte, 9+len(payload))
+	tagged[0] = vpnIpEnd
+	binary.BigEndian.PutUint64(tagged[1:9], idxPacket)
+	copy(tagged[9:], payload)
 
 	totalLen := 20 + 8 + len(tagged)
 	buf := make([]byte, totalLen)
