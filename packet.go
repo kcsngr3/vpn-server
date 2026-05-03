@@ -21,7 +21,7 @@ type encapsulatedUdpPacket struct {
 type trafficTracker struct {
 	highestId      uint64
 	window         uint64 // bitmask of received ID
-	windowSize     uint64
+	windowSize     uint64 // 64 bit set on init
 	droppedTraffic uint64
 }
 
@@ -88,12 +88,9 @@ func displayPacket(note string, buf []byte, buffSize int, showInner int) {
 		fmt.Printf("  [inner] Dst IP: %d.%d.%d.%d\n", inner[16], inner[17], inner[18], inner[19])
 	}
 }
-func encapsulateUdpPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte, idxPacket uint64, vpnIpEnd byte) *encapsulatedUdpPacket {
-	// guard — catches %x without padding bug early
-	// if len(sessionId) != 4 {
-	// 	panic(fmt.Sprintf("sessionId must be 4 chars, got %d: '%s'", len(sessionId), sessionId))
-	// }
 
+func encapsulateUdpPacket(srcIP, dstIP [4]byte, srcPort, dstPort uint16, payload []byte, idxPacket uint64, vpnIpEnd byte) *encapsulatedUdpPacket {
+	
 	tagged := make([]byte, 9+len(payload))
 	tagged[0] = vpnIpEnd
 	binary.BigEndian.PutUint64(tagged[1:9], idxPacket)

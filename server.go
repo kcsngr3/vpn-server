@@ -11,12 +11,13 @@ import (
 )
 
 type ClientSession struct {
-	nicIp             [4]byte
+	nicIp             [4]byte 
 	vpnIp             [4]byte
 	eh                encryptHandler
 	sessionTime       time.Time
-	sessionTrafficBit atomic.Uint64
-	sessionID         string
+	lastTrafficTime 	time.Time
+	sessionTrafficBytes atomic.Uint64
+	sessionId         string
 	serverToClient    *trafficTracker
 	clientToServer    *trafficTracker
 }
@@ -26,7 +27,7 @@ type Server struct {
 	sendFd int
 	recvFd int
 	mu     sync.RWMutex
-	ippool *IPPool // contain all interfaceID-byte , sessionID - uint16
+	ippool *IPPool // contain all interfaceID-byte , sessionId - uint16
 
 	session map[byte]*ClientSession //map interfacce ip-byte , clientobj
 
@@ -35,8 +36,7 @@ type Server struct {
 
 func (s *Server) listAllSessionTraffic() {
 	for _, cs := range s.session {
-		// fmt.Printf("SessionID: %s , Traffic Bit: %d\n", cs.sessionID, cs.sessionTrafficBit.Load())
-		fmt.Printf("SessionID: %s, SessionTime: %s, trfficByte: %d, scID: %d, csID: %d, scDropped: %d, csDropped: %d ", cs.sessionID, cs.sessionTime, cs.sessionTrafficBit.Load(), cs.serverToClient.highestId, cs.clientToServer.highestId, cs.serverToClient.droppedTraffic, cs.clientToServer.droppedTraffic)
+		fmt.Printf("SessionID: %s, SessionTime: %s, trfficByte: %d, scID: %d, csID: %d, scDropped: %d, csDropped: %d ", cs.sessionId, cs.sessionTime, cs.sessionTrafficBytes.Load(), cs.serverToClient.highestId, cs.clientToServer.highestId, cs.serverToClient.droppedTraffic, cs.clientToServer.droppedTraffic)
 	}
 
 }
@@ -75,9 +75,9 @@ func (s *Server) filterTrafficToClient(buf []byte, buffSize int) bool {
 	return true
 }
 
-// decrypt  need a sessionId, and the unique eh taht contain each session privatekey and sessionkey for auth
+// decrypt  need a sessionId, and the unique eh that contain each session privatekey and sessionkey for auth
 func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
-
+	// potential performance upgrade to not init new values, currently provide readablility
 	payload := buf[28:buffSize]
 	vpnIpEnd := payload[0]
 	idxPacket := payload[1:9]
@@ -89,10 +89,10 @@ func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
 		s.mu.Unlock()
 		return
 	}
-	cs.sessionTime = time.Now()
+	cs.lastTrafficTime = time.Now()
 	s.mu.Unlock()
 
-	cs.sessionTrafficBit.Add(uint64(buffSize))
+	cs.sessionTrafficBytes.Add(uint64(buffSize))
 	idx := binary.BigEndian.Uint64(idxPacket)
 	if !cs.clientToServer.verifyId(idx) {
 		cs.clientToServer.droppedTraffic++
@@ -118,7 +118,7 @@ func (s *Server) sendEncapTrafficToClient(buf []byte, buffSize int) {
 		return
 	}
 
-	cs.sessionTrafficBit.Add(uint64(buffSize))
+	cs.sessionTrafficBytes.Add(uint64(buffSize))
 	idx := cs.serverToClient.incrementId()
 	newp := encapsulateUdpPacket(s.nicIP, cs.nicIp, 51820, 51820, cs.eh.encryptPacket(buf[:buffSize], idx, cs.vpnIp[3]), idx, cs.vpnIp[3])
 	// displayPacket("Server generated packet -> client", newp.data, int(newp.lengthOfData), 0)
@@ -180,6 +180,9 @@ func (s *Server) goWatchTimeOut() {
 				fmt.Printf("session %x timed out\n", id)
 				toDelete = append(toDelete, id)
 			}
+			if time.Since(cs.lastTrafficTime) >= 2*time.Minute {
+   				toDelete = append(toDelete, id)
+			}	
 		}
 		s.mu.Unlock()
 

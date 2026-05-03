@@ -23,6 +23,7 @@ type IPPool struct {
 func newIPPool() *IPPool {
 	return &IPPool{usedIp: make(map[byte]uint16)}
 }
+//
 func (pool *IPPool) assignIP(sessionId uint16) (byte, uint16, error) {
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
@@ -69,7 +70,7 @@ func ListenAuth(server *Server) {
 				mac := hmac.New(sha256.New, []byte(preSharedKey))
 				mac.Write(serverPubKey.Bytes())
 
-				//randem nonce and send
+				//random nonce and send
 				conn.Write(serverPubKey.Bytes())
 				conn.Write(mac.Sum(nil))
 
@@ -104,12 +105,12 @@ func ListenAuth(server *Server) {
 					c.RemoteAddr(), sessionId, vpnIpEnd) // log success
 				addr := conn.RemoteAddr().(*net.TCPAddr)
 				ip := addr.IP.To4()
-				// sessionIdStringHex := fmt.Sprintf("%04x", sessionId) //make uint into strhex
+				
 
 				//need lock
 				server.mu.Lock()
 				server.session[vpnIpEnd] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey), sessionTime: time.Now(), clientToServer: initTrafficTracker(), serverToClient: initTrafficTracker()}
-				// server.dstIpToSessionId[vpnIpEnd] = sessionIdStringHex
+				
 				eh := server.session[vpnIpEnd].eh
 				server.mu.Unlock()
 

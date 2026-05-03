@@ -17,7 +17,7 @@ type Client struct {
 	recvFd         int
 	counter        *atomic.Int64
 	eh             encryptHandler
-	sessionId      string // its shoudl be uint32-> now large number ->in hex
+	sessionId     string // 
 	vpnIpEnd       byte
 	clientToServer *trafficTracker
 	serverToClient *trafficTracker
@@ -55,7 +55,6 @@ func (c *Client) sendEncapTrafficToServer(buf []byte, buffSize int) {
 	// displayPacket("Client original packet->server", buf, buffSize, 0)
 	idx := c.clientToServer.incrementId()
 	encrypt := c.eh.encryptPacket(buf[:buffSize], idx, c.vpnIpEnd)
-	// fmt.Printf("WITH ENCRYPT %d + 20 ip header + 8 udp header + 4 sesssionid sum: %d Just encrypt overhead : %d \n", len(encrypt), 20+8+4+len(encrypt), len(encrypt)-buffSize)
 	newp := encapsulateUdpPacket(c.nicIP, c.srvIP, 51820, 51820, encrypt, idx, c.vpnIpEnd)
 	// displayPacket("Client vpn packet->server", newp.data, int(newp.lengthOfData), 0)
 	dest := &syscall.SockaddrInet4{Port: 0, Addr: c.srvIP}

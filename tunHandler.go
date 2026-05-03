@@ -93,16 +93,18 @@ func RouteThrowTun(name string, tunIP string, serverIP string) {
 	iface := getDefaultInterface()
 	gw := getDefaultGateway()
 	dns := getCurrentDNS()
-	fmt.Printf("Iface: %s\nGateway: %s\nDns: %s\n", iface, gw, dns)
-	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
-
+	
+	// product routing 
 	// exec.Command("ip", "route", "add", serverIP+"/32",
 	// 	"via", gw, "dev", iface).CombinedOutput()
 
+
+	//test env vm setup 
+	fmt.Printf("Iface: %s\nGateway: %s\nDns: %s\n", iface, gw, dns)
+	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
 	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
 	exec.Command("ip", "route", "add", "default", "via", gw,
 		"dev", iface, "table", "200").CombinedOutput()
-
 	exec.Command("resolvectl", "dns", name, dns).CombinedOutput()
 	exec.Command("resolvectl", "domain", name, "~.").CombinedOutput()
 }
@@ -147,18 +149,4 @@ func getCurrentDNS() string {
 	return getDefaultGateway() // fallback to gateway as DNS
 }
 
-// func getGCloudNicIP() (string, error) {
-// 	client := &http.Client{Timeout: 2 * time.Second}
-// 	req, _ := http.NewRequest("GET",
-// 		"http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip",
-// 		nil)
-// 	req.Header.Set("Metadata-Flavor", "Google")
 
-// 	resp, err := client.Do(req)
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	defer resp.Body.Close()
-// 	ip, _ := io.ReadAll(resp.Body)
-// 	return string(ip), nil
-// }
