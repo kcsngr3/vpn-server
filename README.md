@@ -16,12 +16,5 @@ When a VPN session disconnects, the final state — bytes transferred, packets d
 
 **Container Architecture**
 
-Each regional VM runs one Docker container: the PostgreSQL publisher. The VPN server runs directly on the host as a systemd service, because it requires kernel-level access to create TUN interfaces and manipulate routing tables — capabilities that conflict with Docker's isolation model.
-
-The central VM runs two containers managed by Docker Compose: the PostgreSQL subscriber and the monitoring web service. Keeping these as separate containers follows the single responsibility principle — the database and the web service can be restarted, updated, or scaled independently.
-
-**Monitoring Service**
-
-The monitoring web service reads exclusively from the central database. It exposes a REST API consumed by a React frontend that displays all regions side by side in real time. Because the central database already contains all regional data via replication, the monitoring service needs no knowledge of individual region addresses or credentials — it has one database connection and one source of truth.
-
-Adding a new region in the future requires only deploying a new VM with the same Go binary and Docker configuration, then adding one replication subscription on the central database. No existing code changes.
+The monitoring web service reads exclusively from the central database. It is a single Go binary that serves a static HTML dashboard and streams live data to the browser using Server-Sent Events over one persistent HTTP connection. Because the central database already contains all regional data via replication, the monitoring service needs no knowledge of individual region addresses or credentials. It has one database connection and one source of truth.
+Adding a new region in the future requires only deploying a new VM with the same Go binary and Docker configuration, then adding one replication subscription on the central database. The monitoring dashboard will reflect the new region automatically with no code changes required.
