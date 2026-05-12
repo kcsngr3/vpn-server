@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -58,61 +60,84 @@ func SetTUNip(name string, ip string) {
 // initSockets is shared by both client and server.
 // mode = "client" → recvFd is SOCK_DGRAM (kernel strips headers)
 // mode = "server" → recvFd is SOCK_RAW  (full packet, manual port filter)
-func initSockets(mode string) (sendFd int, recvFd int) {
-	var err error
+// func initSockets(mode string) (sendFd int, recvFd int) {
+// 	var err error
 
-	sendFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
-	if err != nil {
-		log.Fatal("sendFd socket:", err)
-	}
-	err = syscall.SetsockoptInt(sendFd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
-	if err != nil {
-		log.Fatal("IP_HDRINCL:", err)
-	}
+// 	sendFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_RAW)
+// 	if err != nil {
+// 		log.Fatal("sendFd socket:", err)
+// 	}
+// 	err = syscall.SetsockoptInt(sendFd, syscall.IPPROTO_IP, syscall.IP_HDRINCL, 1)
+// 	if err != nil {
+// 		log.Fatal("IP_HDRINCL:", err)
+// 	}
 
-	if mode == "client" {
-		recvFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
-	} else {
-		recvFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_UDP)
-	}
-	if err != nil {
-		log.Fatal("recvFd socket:", err)
-	}
+// 	if mode == "client" {
+// 		recvFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
+// 	} else {
+// 		recvFd, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_UDP)
+// 	}
+// 	if err != nil {
+// 		log.Fatal("recvFd socket:", err)
+// 	}
 
-	addr := syscall.SockaddrInet4{Port: 51820}
-	if err = syscall.Bind(recvFd, &addr); err != nil {
-		log.Fatal("Bind 51820:", err)
-	}
+// 	addr := syscall.SockaddrInet4{Port: 51820}
+// 	if err = syscall.Bind(recvFd, &addr); err != nil {
+// 		log.Fatal("Bind 51820:", err)
+// 	}
 
-	return sendFd, recvFd
-}
+// 	return sendFd, recvFd
+// }
 
 func RouteThrowTun(name string, tunIP string, serverIP string) {
 	// virbr0 kernel route already handles 192.168.122.x — no /32 needed
-	// just replace default, virbr0 subnet wins automatically
+
 	iface := getDefaultInterface()
 	gw := getDefaultGateway()
 	dns := getCurrentDNS()
 	fmt.Printf("Iface: %s\nGateway: %s\nDns: %s\n", iface, gw, dns)
+
+	//for real usage
+	exec.Command("ip", "route", "add", serverIP+"/32",
+		"via", gw, "dev", iface).CombinedOutput()
 	exec.Command("ip", "route", "replace", "default", "dev", name).CombinedOutput()
 
-	// exec.Command("ip", "route", "add", serverIP+"/32",
-	// 	"via", gw, "dev", iface).CombinedOutput()
+	// for laptop vm test env
+	// exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
+	// exec.Command("ip", "route", "add", "default", "via", gw,
+	// 	"dev", iface, "table", "200").CombinedOutput()
 
-	exec.Command("ip", "rule", "add", "iif", "virbr0", "table", "200").CombinedOutput()
-	exec.Command("ip", "route", "add", "default", "via", gw,
-		"dev", iface, "table", "200").CombinedOutput()
-
-	exec.Command("resolvectl", "dns", name, dns).CombinedOutput()
-	exec.Command("resolvectl", "domain", name, "~.").CombinedOutput()
+	// exec.Command("resolvectl", "dns", name, dns).CombinedOutput()
+	// exec.Command("resolvectl", "domain", name, "~.").CombinedOutput()
 }
 
-func RouteThrowTunServer(name string) {
+func RouteThrowTunServer(name string) error {
 	iface := getDefaultInterface()
-	exec.Command("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward").CombinedOutput()
-	exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
+
+	// 1. Enable IP forwarding
+	out, err := exec.Command("sh", "-c", "echo 1 > /proc/sys/net/ipv4/ip_forward").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to enable IP forwarding: %v (output: %s)", err, string(out))
+	}
+
+	// 2. Configure iptables masquerading
+	out, err = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
 		"-s", "192.168.0.0/24", "-o", iface, "-j", "MASQUERADE").CombinedOutput()
-	exec.Command("ip", "route", "add", "192.168.0.0/24", "dev", name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to set iptables MASQUERADE on %s: %v (output: %s)", iface, err, string(out))
+	}
+
+	// 3. Add IP route
+	out, err = exec.Command("ip", "route", "add", "192.168.0.0/24", "dev", name).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to add route for %s: %v (output: %s)", name, err, string(out))
+	}
+	// Allow traffic from the VPN subnet out to the internet
+	out, err = exec.Command("iptables", "-A", "FORWARD", "-s", "192.168.0.0/24", "-j", "ACCEPT").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("fail to accept traffci from internet %s: %v (output: %s)", name, err, string(out))
+	}
+	return nil
 }
 func getDefaultGateway() string {
 	out, _ := exec.Command("ip", "route", "show", "default").Output()
@@ -147,18 +172,18 @@ func getCurrentDNS() string {
 	return getDefaultGateway() // fallback to gateway as DNS
 }
 
-// func getGCloudNicIP() (string, error) {
-// 	client := &http.Client{Timeout: 2 * time.Second}
-// 	req, _ := http.NewRequest("GET",
-// 		"http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip",
-// 		nil)
-// 	req.Header.Set("Metadata-Flavor", "Google")
+func getGCloudNicIP() (string, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, _ := http.NewRequest("GET",
+		"http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/ip",
+		nil)
+	req.Header.Set("Metadata-Flavor", "Google")
 
-// 	resp, err := client.Do(req)
-// 	if err != nil {
-// 		return "", err
-// 	}
-// 	defer resp.Body.Close()
-// 	ip, _ := io.ReadAll(resp.Body)
-// 	return string(ip), nil
-// }
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	ip, _ := io.ReadAll(resp.Body)
+	return string(ip), nil
+}

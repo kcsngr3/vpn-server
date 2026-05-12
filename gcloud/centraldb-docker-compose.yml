@@ -1,0 +1,18 @@
+services:
+  pg-central:
+    image: postgres:16-alpine
+    container_name: pg-central
+    restart: always
+    environment:
+      POSTGRES_USER: vpnadmin
+      POSTGRES_PASSWORD: vpnadmin_central
+      POSTGRES_DB: vpndb
+    volumes:
+      - pg-central-data:/var/lib/postgresql/data
+      - ./init-central.sql:/docker-entrypoint-initdb.d/init-central.sql
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf
+    ports:
+      - "5433:5432" 
+
+volumes:
+  pg-central-data:

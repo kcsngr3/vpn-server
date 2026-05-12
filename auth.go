@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -61,6 +60,13 @@ func ListenAuth(server *Server) {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
+				//read i ncoming tcp
+				clientPubKeyByte := make([]byte, 32)
+				clientHmac := make([]byte, 32)
+
+				io.ReadFull(conn, clientPubKeyByte)
+				io.ReadFull(conn, clientHmac)
+
 				// make diffie
 				curve := ecdh.X25519()
 				serverPrivKey, err := curve.GenerateKey(rand.Reader)
@@ -72,13 +78,6 @@ func ListenAuth(server *Server) {
 				//randem nonce and send
 				conn.Write(serverPubKey.Bytes())
 				conn.Write(mac.Sum(nil))
-
-				//read i ncoming tcp
-				clientPubKeyByte := make([]byte, 32)
-				clientHmac := make([]byte, 32)
-
-				io.ReadFull(conn, clientPubKeyByte)
-				io.ReadFull(conn, clientHmac)
 
 				//auth server
 				macClient := hmac.New(sha256.New, []byte(preSharedKey))
@@ -108,9 +107,13 @@ func ListenAuth(server *Server) {
 
 				//need lock
 				server.mu.Lock()
-				server.session[vpnIpEnd] = &ClientSession{nicIp: [4]byte{ip[0], ip[1], ip[2], ip[3]}, vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey), sessionTime: time.Now(), clientToServer: initTrafficTracker(), serverToClient: initTrafficTracker()}
+
+				server.session[vpnIpEnd] = &ClientSession{authIp: ip.String(), sessionID: fmt.Sprintf("%04x", sessionId), vpnIp: [4]byte{192, 168, 0, vpnIpEnd}, eh: *initEncryptHandler(sessionEncKey), sessionTime: time.Now(), sessionIdleTime: time.Now(), clientToServer: initTrafficTracker(), serverToClient: initTrafficTracker()}
 				// server.dstIpToSessionId[vpnIpEnd] = sessionIdStringHex
-				eh := server.session[vpnIpEnd].eh
+				cs := server.session[vpnIpEnd]
+				//db
+				dbSessinID, errDb := server.db.TxCreateSession(fmt.Sprintf("%04x", sessionId), "192.168.0."+fmt.Sprintf("%d", vpnIpEnd), fmt.Sprintf("%x", cs.eh.key))
+				cs.dbSessionID = dbSessinID
 				server.mu.Unlock()
 
 				// combine into one plaintext
@@ -119,180 +122,17 @@ func ListenAuth(server *Server) {
 				plaintext[4] = vpnIpEnd // 1 byte vpnIP
 
 				// encrypt once
-				encrypted := eh.encryptPlain(plaintext)
+				encrypted := cs.eh.encryptPlain(plaintext)
 				c.Write(encrypted)
 
+				if errDb != nil {
+					fmt.Printf("Db creating session Error: ")
+				}
 			}(conn)
 		}
 	}()
 }
-func ListenHeartBeatClient(client *Client) {
-	listenTcp, _ := net.Listen("tcp", ":9001")
-	fmt.Println("Listen HB on:9001")
-	go func() {
-		for {
-			conn, err := listenTcp.Accept()
-			if err != nil {
-				continue
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				c.SetDeadline(time.Now().Add(3 * time.Second))
 
-				hbBuf := make([]byte, 2+8+32)
-				if _, err := io.ReadFull(c, hbBuf); err != nil {
-					return
-				}
-
-				// replay check
-				ts := int64(binary.BigEndian.Uint64(hbBuf[2:10]))
-				if time.Now().UnixNano()-ts > int64(10*time.Second) {
-					fmt.Println("HB replay rejected")
-					return
-				}
-
-				// verify server->client HMAC
-				mac := hmac.New(sha256.New, client.eh.key[:])
-				mac.Write([]byte("server->client"))
-				mac.Write(hbBuf[:10])
-				if !hmac.Equal(mac.Sum(nil), hbBuf[10:]) {
-					fmt.Println("HB HMAC failed")
-					return
-				}
-
-				// build response with fresh client timestamp
-				clientRecv := time.Now().UnixNano()
-				resp := make([]byte, 2+8+32)
-				copy(resp[0:2], hbBuf[0:2])
-				binary.BigEndian.PutUint64(resp[2:10], uint64(clientRecv))
-
-				// re-sign with client->server label
-				mac2 := hmac.New(sha256.New, client.eh.key[:])
-				mac2.Write([]byte("client->server"))
-				mac2.Write(resp[:10])
-				copy(resp[10:], mac2.Sum(nil))
-
-				c.Write(resp)
-			}(conn)
-		}
-	}()
-}
-func ListenHeartBeatServer(server *Server) {
-	listenTcp, _ := net.Listen("tcp", ":9001")
-	fmt.Println("Listen HB on:9001")
-	go func() {
-		for {
-			conn, err := listenTcp.Accept()
-			if err != nil {
-				continue
-			}
-			go func(c net.Conn) {
-				defer c.Close()
-				c.SetDeadline(time.Now().Add(3 * time.Second))
-
-				resp := make([]byte, 2+8+32)
-				if _, err := io.ReadFull(c, resp); err != nil {
-					return
-				}
-
-				// lookup session by sessionId
-				sessionId := binary.BigEndian.Uint16(resp[0:2])
-				server.mu.RLock()
-				var cs *ClientSession
-				for _, s := range server.session {
-					if binary.BigEndian.Uint16([]byte(s.sessionID[:2])) == sessionId {
-						cs = s
-						break
-					}
-				}
-				server.mu.RUnlock()
-				if cs == nil {
-					return
-				}
-
-				// verify client->server HMAC
-				mac := hmac.New(sha256.New, cs.eh.key[:])
-				mac.Write([]byte("client->server"))
-				mac.Write(resp[:10])
-				if !hmac.Equal(mac.Sum(nil), resp[10:]) {
-					fmt.Println("HB echo HMAC failed")
-					return
-				}
-
-				clientTs := int64(binary.BigEndian.Uint64(resp[2:10]))
-				clientToServer := time.Duration(time.Now().UnixNano() - clientTs)
-				fmt.Printf("sessionId=%x c->s=%v\n", sessionId, clientToServer)
-
-				cs.sessionTime = time.Now() // reset watchdog
-			}(conn)
-		}
-	}()
-}
-func (s *Server) sendHeartbeats() {
-	s.mu.RLock()
-	sessions := make(map[byte]*ClientSession)
-	for k, v := range s.session {
-		sessions[k] = v
-	}
-	s.mu.RUnlock()
-
-	for vpnIpEnd, cs := range sessions {
-		go func(id byte, c *ClientSession) {
-			if !s.sendHeartbeat(id, c) {
-				fmt.Printf("HB failed vpnIp=%d closing session\n", id)
-				s.ippool.ReleaseIp(c.vpnIp[3])
-				s.mu.Lock()
-				delete(s.session, id)
-				s.mu.Unlock()
-			}
-		}(vpnIpEnd, cs)
-	}
-}
-func (s *Server) sendHeartbeat(vpnIpEnd byte, cs *ClientSession) bool {
-	addr := fmt.Sprintf("%d.%d.%d.%d:9001",
-		cs.nicIp[0], cs.nicIp[1], cs.nicIp[2], cs.nicIp[3])
-
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-	if err != nil {
-		return false
-	}
-	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(3 * time.Second))
-
-	sentTs := time.Now().UnixNano()
-	hb := make([]byte, 2+8+32)
-	parsed, _ := strconv.ParseUint(cs.sessionID, 16, 16)
-	binary.BigEndian.PutUint16(hb[0:2], uint16(parsed))
-	binary.BigEndian.PutUint64(hb[2:10], uint64(sentTs))
-
-	mac := hmac.New(sha256.New, cs.eh.key[:])
-	mac.Write([]byte("server->client"))
-	mac.Write(hb[:10])
-	copy(hb[10:], mac.Sum(nil))
-
-	if _, err := conn.Write(hb); err != nil {
-		return false
-	}
-
-	resp := make([]byte, 2+8+32)
-	if _, err := io.ReadFull(conn, resp); err != nil {
-		return false
-	}
-
-	// verify client->server HMAC
-	mac2 := hmac.New(sha256.New, cs.eh.key[:])
-	mac2.Write([]byte("client->server"))
-	mac2.Write(resp[:10])
-	if !hmac.Equal(mac2.Sum(nil), resp[10:]) {
-		return false
-	}
-
-	rtt := time.Duration(time.Now().UnixNano() - sentTs)
-	fmt.Printf("vpnIp=%d RTT=%.3fms\n", vpnIpEnd, float64(rtt)/float64(time.Millisecond))
-
-	cs.sessionTime = time.Now()
-	return true
-}
 func processAuth(ippool *IPPool) (uint16, byte, error) {
 	for attempts := 0; attempts < 10; attempts++ {
 		b := make([]byte, 2)
@@ -321,6 +161,138 @@ func processAuth(ippool *IPPool) (uint16, byte, error) {
 		return sessionId, vpnIpEnd, nil
 	}
 	return 0, 0, fmt.Errorf("could not allocate unique sessionId")
+}
+
+// hb
+func (client *Client) sendHearthBeat() bool {
+	// strip the port first
+	serverAddr := client.conn.RemoteAddr().String()
+	host, _, _ := net.SplitHostPort(serverAddr)
+	conn, err := net.DialTimeout("tcp", host+":9001", 3*time.Second)
+
+	if err != nil {
+		fmt.Println(err)
+		return false
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(3 * time.Second)) // if eaither sides dies durring hb
+	clientHbTs := time.Now().UnixNano()
+	hbMess := make([]byte, 4+8+32)
+
+	// write sessionId
+	copy(hbMess[0:4], []byte(client.sessionId))
+
+	// timestamp
+	binary.BigEndian.PutUint64(hbMess[4:12], uint64(clientHbTs))
+
+	// sign
+	mac := hmac.New(sha256.New, client.eh.key[:])
+	mac.Write([]byte(client.sessionId + "0")) // 0 represent client
+	mac.Write(hbMess[:12])
+	copy(hbMess[12:], mac.Sum(nil))
+	conn.Write(hbMess)
+
+	resp := make([]byte, 4+8+32)
+	io.ReadFull(conn, resp)
+	//verify
+	mac2 := hmac.New(sha256.New, client.eh.key[:])
+	mac2.Write([]byte(client.sessionId + "1")) // 1 represent server
+	mac2.Write(resp[:12])
+	if !hmac.Equal(mac2.Sum(nil), resp[12:]) {
+		fmt.Println("hmac fails2")
+		return false
+
+	}
+
+	rtt := time.Duration(time.Now().UnixNano() - clientHbTs)
+	fmt.Printf("RTT=%.3fms\n", float64(rtt)/float64(time.Millisecond))
+
+	hbLatency := make([]byte, 4+8+32)
+	copy(hbLatency[0:4], []byte(client.sessionId))           // sessionId 4 bytes
+	binary.BigEndian.PutUint64(hbLatency[4:12], uint64(rtt)) // rtt 8 bytes
+
+	mac3 := hmac.New(sha256.New, client.eh.key[:])
+	mac3.Write([]byte(client.sessionId + "2"))
+	mac3.Write(hbLatency[:12]) // sessionId + rtt
+	copy(hbLatency[12:], mac3.Sum(nil))
+
+	conn.Write(hbLatency)
+	return true
+
+}
+func (server *Server) ListenHeartBeatServer() {
+	listenTcp, _ := net.Listen("tcp", ":9001")
+	fmt.Println("Listen hb on:9001")
+	go func() {
+		for {
+			conn, _ := listenTcp.Accept()
+			go func(c net.Conn) {
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(3 * time.Second))
+
+				hbMess := make([]byte, 4+8+32)
+				io.ReadFull(c, hbMess)
+
+				// lookup session
+				sessionId := string(hbMess[:4])
+				server.mu.RLock()
+				var cs *ClientSession
+				for _, s := range server.session {
+					if s.sessionID == sessionId {
+						cs = s
+						break
+					}
+				}
+				server.mu.RUnlock()
+				if cs == nil {
+					return
+				}
+
+				// verify client->server HMAC
+				mac := hmac.New(sha256.New, cs.eh.key[:])
+				mac.Write([]byte(sessionId + "0"))
+				mac.Write(hbMess[:12])
+				if !hmac.Equal(mac.Sum(nil), hbMess[12:]) {
+					return
+				}
+
+				// reset watchdog
+				cs.sessionIdleTime = time.Now()
+
+				// echo back signed with server->client
+				resp := make([]byte, 4+8+32)
+				copy(resp[0:12], hbMess[0:12]) // same sessionId + timestamp
+				mac2 := hmac.New(sha256.New, cs.eh.key[:])
+				mac2.Write([]byte(sessionId + "1"))
+				mac2.Write(resp[:12])
+				copy(resp[12:], mac2.Sum(nil))
+				c.Write(resp)
+
+				ttrMess := make([]byte, 4+8+32)
+				io.ReadFull(c, ttrMess)
+				sessionIdTtr := string(ttrMess[0:4])
+
+				if sessionIdTtr != sessionId {
+					return
+				}
+
+				mac3 := hmac.New(sha256.New, cs.eh.key[:])
+				mac3.Write([]byte(sessionId + "2"))
+				mac3.Write(ttrMess[:12])
+				if !hmac.Equal(mac3.Sum(nil), ttrMess[12:]) {
+					return
+				}
+
+				server.mu.Lock()
+				cs.sessionLatency = time.Duration(binary.BigEndian.Uint64(ttrMess[4:12]))
+				latencyLocal := time.Duration(binary.BigEndian.Uint64(ttrMess[4:12]))
+				server.db.InsertHb(cs.dbSessionID, cs.sessionLatency.Seconds(), true)
+				server.mu.Unlock()
+				fmt.Printf("Session: %s Latency: %v \n", sessionId, latencyLocal)
+
+			}(conn)
+		}
+	}()
 }
 
 // client

@@ -1,0 +1,24 @@
+services:
+  pg-region:
+    image: postgres:16-alpine
+    container_name: pg-region
+    restart: always
+    environment:
+      POSTGRES_USER: vpnadmin
+      POSTGRES_PASSWORD: vpnadmin_region
+      POSTGRES_DB: vpndb
+    volumes:
+      - pg-region-data:/var/lib/postgresql/data
+      - ./init-region.sql:/docker-entrypoint-initdb.d/init-region.sql
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf
+    ports:
+      - "5432:5432"
+    command: >
+      postgres
+        -c wal_level=logical
+        -c max_replication_slots=5
+        -c max_wal_senders=5
+        -c hba_file=/etc/postgresql/pg_hba.conf
+
+volumes:
+  pg-region-data:

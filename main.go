@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sync/atomic"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 var mode = flag.String("mode", "client", "client or server")
-var nicIPFlag = flag.String("nic", "192.168.122.1", "real NIC IP address")
-var serverIP = flag.String("server", "", "VPN server IP (client mode only)")
 var globalServer *Server
+var globalClient *Client
 
 func parseIPFlag(ipStr string) [4]byte {
 	parsed := net.ParseIP(ipStr)
@@ -28,18 +29,10 @@ func parseIPFlag(ipStr string) [4]byte {
 func main() {
 	flag.Parse()
 
-	// auto-detect NIC IP if not provided
-	// if *nicIPFlag == "" {
-	// 	ip, err := getGCloudNicIP()
-	// 	if err != nil {
-	// 		log.Fatal("no --nic provided and gcloud metadata failed:", err)
-	// 	}
-	// 	*nicIPFlag = ip
-	// 	fmt.Printf("Auto-detected NIC IP from GCloud: %s\n", ip)
-	// }
-	nicIP := parseIPFlag(*nicIPFlag)
-	fmt.Printf("Mode:   %s\n", *mode)
-	fmt.Printf("NIC IP: %d.%d.%d.%d\n", nicIP[0], nicIP[1], nicIP[2], nicIP[3])
+	cfg, err := loadConfig("config.conf")
+	if err != nil {
+		log.Fatal("config load failed:", err)
+	}
 
 	fd, name, err := OpenTUN("vpntun")
 	if err != nil {
@@ -47,66 +40,87 @@ func main() {
 	}
 	fmt.Println("Interface:", name)
 
-	counter := &atomic.Int64{}
-
 	switch *mode {
 	case "client":
-		if *serverIP == "" {
-			log.Fatal("client mode requires -server flag")
+		serverIP := cfg.Client.ServerIP
+		if serverIP == "" {
+			log.Fatal("client config requires server_ip")
 		}
-		srvIP := parseIPFlag(*serverIP)
-		fmt.Printf("Server: %d.%d.%d.%d\n", srvIP[0], srvIP[1], srvIP[2], srvIP[3])
 
-		// declare empty client first
+		fmt.Printf("Mode:   client\n")
+		fmt.Printf("Server: %s\n", serverIP)
+
 		c := &Client{}
 
-		// auth — passes empty client, fills eh inside
-		ipEnd, err := SendAuth(c, *serverIP)
+		ipEnd, err := SendAuth(c, serverIP)
 		if err != nil {
 			log.Fatal("Auth failed:", err)
 		}
 
-		// now build the rest
-		sendFd, recvFd := initClient(fmt.Sprintf("192.168.0.%d", ipEnd))
+		c.conn = initClient(fmt.Sprintf("192.168.0.%d", ipEnd), serverIP)
 		c.fd = fd
-		c.nicIP = nicIP
-		c.srvIP = srvIP
-		c.sendFd = sendFd
-		c.recvFd = recvFd
-		c.counter = counter
 		c.vpnIpEnd = byte(ipEnd)
 		c.serverToClient = initTrafficTracker()
 		c.clientToServer = initTrafficTracker()
-		//eh set in the auth fase
-
+		globalClient = c
 		c.Run()
-		ListenHeartBeatClient(c)
+
+		go loopInput()
+		select {}
+
 	case "server":
-		fmt.Println("Server mode")
-		RouteThrowTunServer("vpnTun")
-		sendFd, recvFd := initServer()
+		nicIP := cfg.Server.NicIP
+		if nicIP == "" {
+			nicIP, err = getGCloudNicIP()
+			if err != nil {
+				log.Fatal("nic_ip not set and gcloud metadata failed:", err)
+			}
+		}
+
+		fmt.Printf("Mode:     server\n")
+		fmt.Printf("NIC IP:   %s\n", nicIP)
+		fmt.Printf("Region:   %s\n", cfg.Server.Region)
+		fmt.Printf("ServerID: %s\n", cfg.Server.ServerID)
+
+		db, err := initDb(cfg.Server.DbURL, cfg.Server.ServerID, cfg.Server.Region)
+		if err != nil {
+			log.Fatal("DB init failed:", err)
+		}
+
+		errInitDb := db.TxInitServer(cfg.Server.ServerID, nicIP, cfg.Server.Region)
+		if errInitDb != nil {
+			log.Fatal("DB server init failed:", errInitDb)
+		}
+
 		s := &Server{
 			fd:      fd,
-			nicIP:   nicIP,
-			sendFd:  sendFd,
-			recvFd:  recvFd,
 			ippool:  newIPPool(),
-			session: make(map[byte]*ClientSession), // ADD
-
-			// dstIpToSessionId: make(map[byte]string),           // ADD
+			session: make(map[byte]*ClientSession),
+			db:      db,
 		}
+		s.conn = initServer(cfg.Server.TunIP)
 		globalServer = s
+
 		s.Run()
+		RouteThrowTunServer("vpntun")
 		ListenAuth(s)
-		ListenHeartBeatServer(s)
+		s.ListenHeartBeatServer()
 		go s.goWatchTimeOut()
 
-	default:
-		panic("unrecognized escape character")
-	}
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	go loopInput()
-	select {}
+		go loopInput()
+
+		<-sigChan
+		fmt.Println("Shutting down — closing all sessions...")
+		s.closeAllSessions()
+		db.Close()
+		fmt.Println("Done.")
+
+	default:
+		log.Fatal("unknown mode — use -mode=client or -mode=server")
+	}
 }
 
 func loopInput() {
@@ -114,11 +128,11 @@ func loopInput() {
 		var input string
 		fmt.Scan(&input)
 		if input == "n" && *mode == "client" {
-			RouteThrowTun("vpntun", "192.168.0.10", *serverIP)
-			fmt.Print("Routing on")
+			cfg, _ := loadConfig("config.conf")
+			RouteThrowTun("vpntun", "192.168.0."+string(globalClient.vpnIpEnd), cfg.Client.ServerIP)
+			fmt.Println("Routing on")
 		}
 		if input == "l" && *mode == "server" {
-			globalServer.ippool.listIPPool()
 			globalServer.listAllSessionTraffic()
 		}
 	}

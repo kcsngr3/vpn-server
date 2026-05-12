@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VPN Monitor</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:      #0d0f11; --surface: #13161a; --border:  #1f2429;
+    --border2: #2a3038; --text:    #c9d1d9; --muted:   #4a5568;
+    --accent:  #00d4aa; --warn:    #f0a500; --danger:  #e05252; --info: #4a9eff;
+    --mono: 'IBM Plex Mono', monospace; --sans: 'IBM Plex Sans', sans-serif;
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:12px; height:100vh; display:grid; grid-template-rows:38px 1fr; overflow:hidden; }
+  #topbar { display:flex; align-items:center; gap:16px; padding:0 16px; border-bottom:1px solid var(--border); background:var(--surface); }
+  #topbar .logo { font-family:var(--sans); font-weight:500; font-size:13px; color:var(--accent); letter-spacing:.04em; }
+  #topbar .sep { flex:1; }
+  .hb-dot { width:7px; height:7px; border-radius:50%; background:var(--muted); transition:background .3s; }
+  .hb-dot.alive { background:var(--accent); animation:pulse 1.6s infinite; }
+  .hb-dot.dead  { background:var(--danger); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  #conn-status { color:var(--muted); font-size:11px; }
+  #layout { display:grid; grid-template-columns:240px 1fr 280px; overflow:hidden; }
+  .panel { display:flex; flex-direction:column; border-right:1px solid var(--border); overflow:hidden; }
+  .panel:last-child { border-right:none; }
+  .panel-hdr { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:1px solid var(--border); background:var(--surface); font-family:var(--sans); font-size:11px; font-weight:500; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; flex-shrink:0; }
+  .panel-hdr .count { margin-left:auto; background:var(--border2); color:var(--text); padding:1px 6px; border-radius:3px; font-size:10px; }
+  .list { overflow-y:auto; flex:1; }
+  .list::-webkit-scrollbar { width:4px; }
+  .list::-webkit-scrollbar-thumb { background:var(--border2); border-radius:2px; }
+  .srv-row { display:grid; grid-template-columns:8px 1fr; gap:8px; align-items:start; padding:10px 12px; border-bottom:1px solid var(--border); cursor:pointer; transition:background .12s; }
+  .srv-row:hover { background:var(--surface); }
+  .srv-row.selected { background:#0d1f1a; border-left:2px solid var(--accent); }
+  .srv-row .dot { width:7px; height:7px; border-radius:50%; margin-top:3px; flex-shrink:0; }
+  .srv-row .name { font-weight:500; color:var(--text); font-size:12px; }
+  .srv-row .sub  { color:var(--muted); font-size:11px; margin-top:2px; }
+  #mid { display:grid; grid-template-rows:auto 1fr; overflow:hidden; border-right:1px solid var(--border); }
+  .sess-row { display:grid; grid-template-columns:7px 1fr auto; gap:8px; align-items:center; padding:9px 12px; border-bottom:1px solid var(--border); cursor:pointer; transition:background .12s; }
+  .sess-row:hover { background:var(--surface); }
+  .sess-row.selected { background:#0d1520; border-left:2px solid var(--info); }
+  .sess-row .sname { font-weight:500; color:var(--text); }
+  .sess-row .ssub  { color:var(--muted); font-size:11px; margin-top:1px; }
+  .tag { font-size:10px; padding:2px 6px; border-radius:3px; font-weight:500; }
+  .tag-ok   { background:#0d2a1f; color:var(--accent); }
+  .tag-off  { background:#2a1515; color:var(--danger); }
+  .tag-warn { background:#2a2010; color:var(--warn); }
+  #detail { display:grid; grid-template-columns:1fr 1fr; overflow:hidden; border-top:1px solid var(--border); }
+  #detail .panel { border-right:1px solid var(--border); }
+  #detail .panel:last-child { border-right:none; }
+  .data-row { display:flex; gap:6px; padding:7px 12px; border-bottom:1px solid var(--border); font-size:11px; align-items:baseline; }
+  .data-row .ts   { color:var(--muted); min-width:68px; flex-shrink:0; }
+  .data-row .val  { color:var(--text); }
+  .data-row .val.ok   { color:var(--accent); }
+  .data-row .val.fail { color:var(--danger); }
+  .data-row .val.warn { color:var(--warn); }
+  .data-row .meta { color:var(--muted); font-size:10px; margin-left:auto; }
+  .stat-strip { display:grid; grid-template-columns:repeat(4,1fr); border-bottom:1px solid var(--border); flex-shrink:0; }
+  .stat { padding:8px 12px; border-right:1px solid var(--border); }
+  .stat:last-child { border-right:none; }
+  .stat .slbl { font-size:10px; color:var(--muted); margin-bottom:2px; }
+  .stat .sval { font-size:14px; font-weight:500; color:var(--text); }
+  #txpanel { display:flex; flex-direction:column; overflow:hidden; }
+  .tx-row { padding:8px 12px; border-bottom:1px solid var(--border); font-size:11px; animation:fadein .3s ease; }
+  @keyframes fadein { from{opacity:0;transform:translateY(-4px)} to{opacity:1;transform:none} }
+  .tx-row .tx-hdr { display:flex; gap:6px; align-items:center; margin-bottom:2px; }
+  .tx-row .ev  { font-weight:500; color:var(--text); }
+  .tx-row .st  { margin-left:auto; }
+  .tx-row .det { color:var(--muted); font-size:10px; }
+  .empty { padding:20px 12px; color:var(--muted); font-size:11px; text-align:center; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <span class="logo">VPN MONITOR</span>
+  <div class="hb-dot" id="hb-dot"></div>
+  <span id="conn-status">connecting…</span>
+  <span class="sep"></span>
+  <span id="clock" style="color:var(--muted);font-size:11px"></span>
+</div>
+<div id="layout">
+  <div class="panel">
+    <div class="panel-hdr">Servers <span class="count" id="srv-count">0</span></div>
+    <div class="list" id="srv-list"><div class="empty">waiting…</div></div>
+  </div>
+  <div id="mid">
+    <div style="display:flex;flex-direction:column;overflow:hidden;border-bottom:1px solid var(--border)">
+      <div class="panel-hdr">
+        Sessions
+        <span id="sess-server-lbl" style="color:var(--accent);margin-left:4px"></span>
+        <span class="count" id="sess-count">0</span>
+      </div>
+      <div class="list" id="sess-list" style="max-height:200px"><div class="empty">select a server</div></div>
+    </div>
+    <div id="detail">
+      <div class="panel">
+        <div class="panel-hdr">Snapshots <span class="count" id="snap-count">0</span></div>
+        <div class="stat-strip" id="snap-stats" style="display:none">
+          <div class="stat"><div class="slbl">rtt</div><div class="sval" id="s-rtt">—</div></div>
+          <div class="stat"><div class="slbl">bytes</div><div class="sval" id="s-bytes">—</div></div>
+          <div class="stat"><div class="slbl">dropped</div><div class="sval" id="s-drop">—</div></div>
+          <div class="stat"><div class="slbl">pkts Sent</div><div class="sval" id="s-pkts">—</div></div>
+           <div class="stat"><div class="slbl">pkts Recv</div><div class="sval" id="r-pkts">—</div></div>
+        </div>
+        <div class="list" id="snap-list"><div class="empty">select a session</div></div>
+      </div>
+      <div class="panel">
+        <div class="panel-hdr">Heartbeats <span class="count" id="hb-count">0</span></div>
+        <div class="list" id="hb-list"><div class="empty">select a session</div></div>
+      </div>
+    </div>
+  </div>
+  <div id="txpanel">
+    <div class="panel-hdr">
+      Transaction log
+      <span id="tx-sess-lbl" style="color:var(--info);margin-left:4px"></span>
+      <span class="count" id="tx-count">0</span>
+    </div>
+    <div class="list" id="tx-list"><div class="empty">select a session</div></div>
+  </div>
+</div>
+<script>
+const state = {
+  servers:   [],
+  sessions:  [],
+  selSrv:    null,   // server_id text
+  selSessID: null,   // sessions.id UUID string — FK key for snap/hb/tx buckets
+  snaps: {},
+  hbs:   {},
+  txs:   {},
+};
+
+const CAP = 50;
+function cappedPrepend(arr, item) {
+  arr.unshift(item);
+  if (arr.length > CAP) arr.length = CAP;
+}
+
+function connect() {
+  const es = new EventSource('/events');
+  const dot = document.getElementById('hb-dot');
+  const cst = document.getElementById('conn-status');
+  es.onopen = () => { dot.className='hb-dot alive'; cst.textContent='connected'; cst.style.color='var(--accent)'; };
+  es.onerror = () => { dot.className='hb-dot dead'; cst.textContent='reconnecting…'; cst.style.color='var(--danger)'; };
+  es.addEventListener('servers',   e => { state.servers  = JSON.parse(e.data) || []; renderServers(); renderSessions(); });
+  // sessions.id is UUID string — used as bucket key
+  es.addEventListener('sessions',  e => { state.sessions = JSON.parse(e.data) || []; renderServers(); renderSessions(); });
+  es.addEventListener('snapshot',  e => onSnapshot(JSON.parse(e.data)));
+  es.addEventListener('heartbeat', e => onHeartbeat(JSON.parse(e.data)));
+  es.addEventListener('txlog',     e => onTxLog(JSON.parse(e.data)));
+}
+
+// snap/hb/tx row.session_id = sessions.id UUID string
+function onSnapshot(row) {
+  const key = row.session_id;
+  if (!state.snaps[key]) state.snaps[key] = [];
+  cappedPrepend(state.snaps[key], row);
+  if (key === state.selSessID) renderSnaps();
+}
+function onHeartbeat(row) {
+  const key = row.session_id;
+  if (!state.hbs[key]) state.hbs[key] = [];
+  cappedPrepend(state.hbs[key], row);
+  if (key === state.selSessID) renderHBs();
+}
+function onTxLog(row) {
+  const key = row.session_id;
+  if (!state.txs[key]) state.txs[key] = [];
+  cappedPrepend(state.txs[key], row);
+  renderTxLog();
+}
+
+function renderServers() {
+  const list = document.getElementById('srv-list');
+  document.getElementById('srv-count').textContent = state.servers.length;
+  if (!state.servers.length) { list.innerHTML='<div class="empty">no servers</div>'; return; }
+  list.innerHTML = '';
+  state.servers.forEach(s => {
+    const active = state.sessions.filter(x => x.server_id === s.server_id && !x.disconnected_at?.Valid).length;
+    const div = document.createElement('div');
+    div.className = 'srv-row' + (state.selSrv === s.server_id ? ' selected' : '');
+    div.innerHTML = `
+      <div class="dot" style="background:${active ? 'var(--accent)' : 'var(--muted)'}"></div>
+      <div>
+        <div class="name">${s.server_id}</div>
+        <div class="sub">${s.ip} · ${s.region}</div>
+        <div class="sub" style="margin-top:2px">${active} active session${active!==1?'s':''}</div>
+      </div>`;
+    div.onclick = () => { state.selSrv = s.server_id; state.selSessID = null; renderServers(); renderSessions(); };
+    list.appendChild(div);
+  });
+}
+
+function renderSessions() {
+  const list = document.getElementById('sess-list');
+  document.getElementById('sess-server-lbl').textContent = state.selSrv ? '· '+state.selSrv : '';
+  const filtered = state.selSrv ? state.sessions.filter(s => s.server_id === state.selSrv) : [];
+  document.getElementById('sess-count').textContent = filtered.length;
+  if (!state.selSrv)    { list.innerHTML='<div class="empty">select a server</div>'; return; }
+  if (!filtered.length) { list.innerHTML='<div class="empty">no sessions</div>'; return; }
+  list.innerHTML = '';
+  filtered.forEach(s => {
+    const active = !s.disconnected_at?.Valid;
+    const shortID = s.session_id.slice(0,4).toUpperCase();
+    const div = document.createElement('div');
+    div.className = 'sess-row' + (state.selSessID === s.id ? ' selected' : '');
+    div.innerHTML = `
+      <div class="dot" style="background:${active ? 'var(--accent)' : 'var(--muted)'}"></div>
+      <div>
+        <div class="sname"><span style="color:var(--accent)">${shortID}</span> <br> tun:${s.vpn_ip} Key:${s.session_key}</div>
+        <div class="ssub">${fmtTime(s.connected_at)}</div>
+      </div>
+      <span class="tag ${active ? 'tag-ok' : 'tag-off'}">${active ? 'active' : 'closed'}</span>`;
+    div.onclick = () => {
+      state.selSessID = s.id;  // UUID string — bucket key
+      renderSessions();
+      if (!active) {
+        fetchHistory(s.id);   // disconnected → fetch last 50 from DB
+      } else {
+        renderSnaps(); renderHBs(); renderTxLog();
+      }
+    };
+    list.appendChild(div);
+  });
+}
+
+function fmtBytes(b) {
+  if (b>=1073741824) return (b/1073741824).toFixed(1)+'GB';
+  if (b>=1048576)    return (b/1048576).toFixed(1)+'MB';
+  if (b>=1024)       return (b/1024).toFixed(1)+'KB';
+  return b+'B';
+}
+function fmtTime(ts) { return new Date(ts).toLocaleTimeString('en-GB',{hour12:false}); }
+
+function renderSnaps() {
+  const list  = document.getElementById('snap-list');
+  const stats = document.getElementById('snap-stats');
+  const rows  = state.selSessID != null ? (state.snaps[state.selSessID] || []) : [];
+  document.getElementById('snap-count').textContent = rows.length;
+  if (state.selSessID == null) { list.innerHTML='<div class="empty">select a session</div>'; stats.style.display='none'; return; }
+  if (!rows.length)            { list.innerHTML='<div class="empty">no snapshots yet</div>'; stats.style.display='none'; return; }
+  const r = rows[0];
+  stats.style.display = '';
+  document.getElementById('s-rtt').textContent   = (r.rtt_ms*1000).toFixed(1)+'ms';
+  document.getElementById('s-bytes').textContent = fmtBytes(r.bytes_total);
+  document.getElementById('s-drop').textContent  = r.dropped_packet;
+  document.getElementById('s-pkts').textContent  = (r.packets_sent).toLocaleString();
+  document.getElementById('r-pkts').textContent  = (r.packets_recv).toLocaleString();
+  list.innerHTML = '';
+  rows.forEach(row => {
+    const rttReal = row.rtt_ms * 1000;
+    const rttCls  = rttReal > 200 ? 'fail' : rttReal > 100 ? 'warn' : 'ok';
+    const d = document.createElement('div');
+    d.className = 'data-row';
+    d.innerHTML = `
+      <span class="ts">${fmtTime(row.recorded_at)}</span>
+      <span class="val ${rttCls}">${rttReal.toFixed(1)}ms</span>
+      <span class="meta">${fmtBytes(row.bytes_total)} · drop:${row.dropped_packet} · ${row.pub_ip}</span>`;
+    list.appendChild(d);
+  });
+}
+
+function renderHBs() {
+  const list = document.getElementById('hb-list');
+  const rows = state.selSessID != null ? (state.hbs[state.selSessID] || []) : [];
+  document.getElementById('hb-count').textContent = rows.length;
+  if (state.selSessID == null) { list.innerHTML='<div class="empty">select a session</div>'; return; }
+  if (!rows.length)            { list.innerHTML='<div class="empty">no heartbeats yet</div>'; return; }
+  list.innerHTML = '';
+  rows.forEach(row => {
+    const d = document.createElement('div');
+    d.className = 'data-row';
+    d.innerHTML = `
+      <span class="ts">${fmtTime(row.recorded_at)}</span>
+      <span class="val ${row.success ? 'ok' : 'fail'}">${row.success ? '✓' : '✗'}</span>
+      <span class="meta">${(row.rtt_ms*1000).toFixed(1)}ms</span>`;
+    list.appendChild(d);
+  });
+}
+
+function renderTxLog() {
+  const list = document.getElementById('tx-list');
+  const rows = state.selSessID != null ? (state.txs[state.selSessID] || []) : [];
+  document.getElementById('tx-count').textContent = rows.length;
+  document.getElementById('tx-sess-lbl').textContent = state.selSessID ? '· '+state.selSessID.slice(0,8)+'…' : '';
+  if (state.selSessID == null) { list.innerHTML='<div class="empty">select a session</div>'; return; }
+  if (!rows.length)            { list.innerHTML='<div class="empty">no transactions yet</div>'; return; }
+  list.innerHTML = '';
+  rows.forEach(row => {
+    const stCls = row.status==='COMMITTED' ? 'tag-ok' : row.status==='error' ? 'tag-off' : 'tag-warn';
+    const det   = row.detail?.Valid ? row.detail.String : '';
+    const d = document.createElement('div');
+    d.className = 'tx-row';
+    d.innerHTML = `
+      <div class="tx-hdr">
+        <span class="ev">${row.event}</span>
+        <span style="color:var(--muted);font-size:10px">${fmtTime(row.created_at)}</span>
+        <span class="st tag ${stCls}">${row.status}</span>
+      </div>
+      ${det ? `<div class="det">${det}</div>` : ''}`;
+    list.appendChild(d);
+  });
+}
+
+async function fetchHistory(sessionID) {
+  try {
+    const res  = await fetch(`/history?session_id=${sessionID}`);
+    const data = await res.json();
+    state.snaps[sessionID] = data.snapshots  || [];
+    state.hbs[sessionID]   = data.heartbeats || [];
+    state.txs[sessionID]   = data.tx_logs    || [];
+    renderSnaps(); renderHBs(); renderTxLog();
+  } catch(e) {
+    console.error('history fetch failed', e);
+  }
+}
+
+setInterval(() => {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-GB',{hour12:false});
+}, 1000);
+
+connect();
+</script>
+</body>
+</html>

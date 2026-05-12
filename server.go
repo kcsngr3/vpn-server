@@ -1,87 +1,64 @@
 package main
 
 import (
-	"encoding/binary"
 	"fmt"
+	"log"
+	"net"
 	"os"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
 type ClientSession struct {
-	nicIp             [4]byte
-	vpnIp             [4]byte
-	eh                encryptHandler
-	sessionTime       time.Time
-	sessionTrafficBit atomic.Uint64
-	sessionID         string
-	serverToClient    *trafficTracker
-	clientToServer    *trafficTracker
+	udpAddrDest         atomic.Pointer[net.UDPAddr] //
+	authIp              string
+	vpnIp               [4]byte
+	eh                  encryptHandler
+	sessionTime         time.Time
+	sessionIdleTime     time.Time
+	sessionLatency      time.Duration
+	sessionTrafficBytes atomic.Uint64
+	sessionID           string
+	serverToClient      *trafficTracker
+	clientToServer      *trafficTracker
+	dbSessionID         string
 }
 type Server struct {
-	fd     *os.File
-	nicIP  [4]byte
-	sendFd int
-	recvFd int
-	mu     sync.RWMutex
-	ippool *IPPool // contain all interfaceID-byte , sessionID - uint16
-
+	fd      *os.File
+	conn    net.PacketConn
+	mu      sync.RWMutex
+	ippool  *IPPool // contain all interfaceID-byte , sessionID - uint16
+	db      *DbHandler
 	session map[byte]*ClientSession //map interfacce ip-byte , clientobj
 
-	//dstIpToSessionId map[byte]byte //map i
 }
 
 func (s *Server) listAllSessionTraffic() {
 	for _, cs := range s.session {
 		// fmt.Printf("SessionID: %s , Traffic Bit: %d\n", cs.sessionID, cs.sessionTrafficBit.Load())
-		fmt.Printf("SessionID: %s, SessionTime: %s, trfficByte: %d, scID: %d, csID: %d, scDropped: %d, csDropped: %d ", cs.sessionID, cs.sessionTime, cs.sessionTrafficBit.Load(), cs.serverToClient.highestId, cs.clientToServer.highestId, cs.serverToClient.droppedTraffic, cs.clientToServer.droppedTraffic)
+		fmt.Printf("SessionID: %s, SessionTime: %s, trfficByte: %d, scID: %d, csID: %d, scDropped: %d, csDropped: %d ", cs.sessionID, cs.sessionTime, cs.sessionTrafficBytes.Load(), cs.serverToClient.highestId, cs.clientToServer.highestId, cs.serverToClient.droppedTraffic.Load(), cs.clientToServer.droppedTraffic.Load())
 	}
 
 }
 
-func initServer() (sendFd int, recvFd int) {
-	sendFd, recvFd = initSockets("server")
-	SetTUNip("vpntun", "192.168.0.1/24")
-	return sendFd, recvFd
-}
-
-func (s *Server) filterTrafficFromClient(buf []byte, buffSize int) bool {
-	if buffSize < 28 {
-		return false
+func initServer(ipStringMask string) net.PacketConn {
+	SetTUNip("vpntun", ipStringMask)
+	conn, err := net.ListenPacket("udp", ":51820")
+	if err != nil {
+		log.Fatal(err)
 	}
-	dstPort := uint16(buf[22])<<8 | uint16(buf[23])
-	if dstPort != 51820 {
-		return false
-	}
-	innerPacket := buf[28:buffSize]
-	if len(innerPacket) < 20 {
-		return false
-	}
-	return true
-}
-
-func (s *Server) filterTrafficToClient(buf []byte, buffSize int) bool {
-	if buffSize < 20 {
-		return false
-	}
-	if buf[16] != 192 || buf[17] != 168 || buf[18] != 0 {
-		return false
-	}
-	if buf[19] == 1 {
-		return false
-	}
-	return true
+	return conn
 }
 
 // decrypt  need a sessionId, and the unique eh taht contain each session privatekey and sessionkey for auth
-func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
+func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int, clientIpAddr net.Addr) {
 
-	payload := buf[28:buffSize]
-	vpnIpEnd := payload[0]
-	idxPacket := payload[1:9]
-	encrypted := payload[9:]
+	idxPacket, vpnIpEnd, encrypted := decapsulatesPacket(buf, buffSize)
+	// payload := buf[28:buffSize]
+	// vpnIpEnd := payload[0]
+	// idxPacket := payload[1:9]
+	// encrypted := payload[9:]
 
 	s.mu.Lock()
 	cs := s.session[vpnIpEnd]
@@ -91,15 +68,19 @@ func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
 	}
 	cs.sessionTime = time.Now()
 	s.mu.Unlock()
+	cs.udpAddrDest.Store(clientIpAddr.(*net.UDPAddr))
+	cs.sessionTrafficBytes.Add(uint64(buffSize))
 
-	cs.sessionTrafficBit.Add(uint64(buffSize))
-	idx := binary.BigEndian.Uint64(idxPacket)
-	if !cs.clientToServer.verifyId(idx) {
-		cs.clientToServer.droppedTraffic++
+	if !cs.clientToServer.verifyId(idxPacket) {
+		cs.clientToServer.droppedTraffic.Add(1)
 		return
 	}
-	innerPacket, _ := cs.eh.decryptPacket(encrypted, idx, vpnIpEnd)
-
+	innerPacket, decryptError := cs.eh.decryptPacket(encrypted, idxPacket, vpnIpEnd)
+	if decryptError != nil {
+		fmt.Printf("Decrypt error: ", decryptError)
+		cs.clientToServer.droppedTraffic.Add(1)
+		return
+	}
 	// displayPacket("Server recive mess from client", buf, buffSize, 0)
 	// displayPacket("Server send mess to internet", innerPacket, len(innerPacket), 0)
 	if _, err := s.fd.Write(innerPacket); err != nil {
@@ -108,41 +89,37 @@ func (s *Server) processDecapsulatedTraffic(buf []byte, buffSize int) {
 }
 
 func (s *Server) sendEncapTrafficToClient(buf []byte, buffSize int) {
-	vpnIpEnd := buf[19]
-	s.mu.RLock()
+	vpnIpEnd := buf[19] // dest ip, should be
 
+	s.mu.RLock()
 	cs := s.session[vpnIpEnd]
 	s.mu.RUnlock()
 
 	if cs == nil {
 		return
 	}
-
-	cs.sessionTrafficBit.Add(uint64(buffSize))
-	idx := cs.serverToClient.incrementId()
-	newp := encapsulateUdpPacket(s.nicIP, cs.nicIp, 51820, 51820, cs.eh.encryptPacket(buf[:buffSize], idx, cs.vpnIp[3]), idx, cs.vpnIp[3])
-	// displayPacket("Server generated packet -> client", newp.data, int(newp.lengthOfData), 0)
-	destAddr := &syscall.SockaddrInet4{Addr: cs.nicIp} // nicIp = real NIC IP to reach client
-	if err := syscall.Sendto(s.sendFd, newp.data, 0, destAddr); err != nil {
-		fmt.Printf("Sendto error: %v\n", err)
+	addr := cs.udpAddrDest.Load()
+	if addr == nil {
+		return
 	}
+	idx := cs.serverToClient.incrementId()
+	encrypted := cs.eh.encryptPacket(buf[:buffSize], idx, vpnIpEnd)
+	_, err := s.conn.WriteTo(encapsulatePacket(idx, vpnIpEnd, encrypted), addr)
+	if err != nil {
+		cs.serverToClient.droppedTraffic.Add(1)
+		return
+	}
+	cs.sessionTrafficBytes.Add(uint64(buffSize))
+
 }
 
 // goIncomingTrafficFromClient receives encapsulated packets from client, decapsulates and writes to TUN
 func (s *Server) goIncomingTrafficFromClient() {
 	buf := make([]byte, 1500)
 	for {
-		buffSize, _, err := syscall.Recvfrom(s.recvFd, buf, 0)
-		if err != nil {
+		buffSize, clientIpAddr, _ := s.conn.ReadFrom(buf)
 
-			fmt.Printf("Recvfrom error: %v\n", err)
-			continue
-		}
-		if !s.filterTrafficFromClient(buf, buffSize) {
-			continue
-		}
-		//displayPacket("clint->server", buf, buffSize, 1)
-		s.processDecapsulatedTraffic(buf, buffSize)
+		s.processDecapsulatedTraffic(buf, buffSize, clientIpAddr)
 	}
 }
 
@@ -155,10 +132,9 @@ func (s *Server) goIncomingTrafficFromInternet() {
 			fmt.Printf("TUN read error: %v\n", err)
 			continue
 		}
-		if !s.filterTrafficToClient(buf, buffSize) {
+		if buffSize < 9 {
 			continue
 		}
-		// displayPacket("Server recive packets from internet", buf, buffSize, 0)
 		s.sendEncapTrafficToClient(buf, buffSize)
 	}
 }
@@ -166,19 +142,24 @@ func (s *Server) goIncomingTrafficFromInternet() {
 func (s *Server) Run() {
 	go s.goIncomingTrafficFromClient()
 	go s.goIncomingTrafficFromInternet()
+	go s.goLogToRegionDb()
+	go s.goWatchTimeOut()
 }
 func (s *Server) goWatchTimeOut() {
 	ticker := time.NewTicker(20 * time.Second)
 	for range ticker.C {
-		s.sendHeartbeats() // HB handles sessionTime reset
 
 		// collect timed out sessions
 		var toDelete []byte
 		s.mu.Lock()
 		for id, cs := range s.session {
-			if time.Since(cs.sessionTime) >= 60*time.Second {
-				fmt.Printf("session %x timed out\n", id)
+			if time.Since(cs.sessionTime) >= 60*time.Second || time.Since(cs.sessionIdleTime) >= 2*time.Minute {
+				fmt.Printf("session - %s timed out\n", cs.sessionID)
 				toDelete = append(toDelete, id)
+				err := s.db.TxDisconnectByHbFail(cs.dbSessionID, 0)
+				if err != nil {
+					fmt.Printf("Failed to close session %s: %v\n", cs.sessionID, err)
+				}
 			}
 		}
 		s.mu.Unlock()
@@ -188,7 +169,43 @@ func (s *Server) goWatchTimeOut() {
 			s.ippool.ReleaseIp(s.session[id].vpnIp[3])
 			s.mu.Lock()
 			delete(s.session, id)
+
 			s.mu.Unlock()
 		}
 	}
+}
+func (s *Server) goLogToRegionDb() {
+	ticker := time.NewTicker(5 * time.Second)
+	for range ticker.C {
+		s.mu.RLock()
+		for _, cs := range s.session {
+			addr := cs.udpAddrDest.Load()
+			if addr == nil {
+				continue
+			}
+			go s.db.TxInsertSessionSnapshot(
+				cs.dbSessionID,
+				addr.String(),
+				int64(cs.serverToClient.highestId),
+				int64(cs.clientToServer.highestId),
+				int64(cs.clientToServer.droppedTraffic.Load()),
+				int64(cs.sessionTrafficBytes.Load()),
+				cs.sessionLatency.Seconds(),
+			)
+		}
+		s.mu.RUnlock()
+	}
+}
+func (s *Server) closeAllSessions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, cs := range s.session {
+		err := s.db.TxDisconnectByHbFail(cs.dbSessionID, 0)
+		if err != nil {
+			fmt.Printf("Failed to close session %s: %v\n", cs.sessionID, err)
+		}
+		s.ippool.ReleaseIp(cs.vpnIp[3])
+	}
+	s.session = make(map[byte]*ClientSession)
 }
